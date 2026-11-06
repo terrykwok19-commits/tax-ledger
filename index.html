@@ -14,6 +14,9 @@
   --tot-bg:#f7f9fc; --tot-sum:#dde8fb; --hl-bg:#eef6f1; --hl-text:#0d5c46;
   --chip:#f1f4f8; --shadow:0 8px 24px rgba(18,32,52,.10); --zero:#9aa6b5;
   --cum-bg:#eef4ff; --cum-head:#d8e4fb; --cum-text:#1e4bc8;
+  --vat-bg:#fff1e0; --vat-text:#8a4a00;
+  --itax-bg:#f3eeff; --itax-text:#4d2f92;
+  --sum2-bg:#e4eeff; --sum2-text:#17439c;
 }
 :root[data-theme="dark"]{
   --bg:#0f1319; --card:#171d26; --line:#252e3b; --line-strong:#374354;
@@ -24,6 +27,9 @@
   --tot-bg:#1a212b; --tot-sum:#22334f; --hl-bg:#15271f; --hl-text:#5ed3a3;
   --chip:#222a36; --shadow:0 8px 24px rgba(0,0,0,.45); --zero:#5c6878;
   --cum-bg:#1a2742; --cum-head:#243350; --cum-text:#8db4ff;
+  --vat-bg:#33260e; --vat-text:#f0be74;
+  --itax-bg:#241f3d; --itax-text:#bda6f2;
+  --sum2-bg:#17233c; --sum2-text:#8fb6ff;
 }
 *{box-sizing:border-box}
 html,body{margin:0;background:var(--bg);color:var(--text);
@@ -94,11 +100,28 @@ td .undo{display:none;position:absolute;right:1px;top:50%;transform:translateY(-
 td.hybrid.manual .undo{display:block;}
 td .undo:hover{background:var(--manual-bd);color:#fff;}
 td.tot{position:sticky;right:0;z-index:1;background:var(--tot-bg);font-weight:600;border-left:2px solid var(--line-strong);}
-tr.hl td,tr.hl th{font-weight:600;}
-tr.hl td.calc{background:var(--hl-bg);color:var(--hl-text);}
-tr.sum td,tr.sum th{font-weight:600;}
-tr.sum td.calc{background:var(--sum-bg);color:var(--accent);}
-tr.sum td.tot{background:var(--tot-sum);}
+/* 需要突出显示的三行：整行填色（输入格、计算格、合计列、累计列一起走） */
+tr.vat td,tr.vat th{background:var(--vat-bg);color:var(--vat-text);font-weight:600;}
+tr.vat td input{color:var(--vat-text);}
+tr.itax td,tr.itax th{background:var(--itax-bg);color:var(--itax-text);font-weight:600;}
+tr.itax td input{color:var(--itax-text);}
+tr.sum td,tr.sum th{background:var(--sum2-bg);color:var(--sum2-text);font-weight:600;}
+tr.sum td input{color:var(--sum2-text);}
+tr.vat td.neg,tr.itax td.neg,tr.sum td.neg{color:var(--red);}
+tr.vat td.cum,tr.itax td.cum,tr.sum td.cum{font-weight:600;}
+tr.vat td.cum{background:var(--vat-bg);color:var(--vat-text);}
+tr.itax td.cum{background:var(--itax-bg);color:var(--itax-text);}
+tr.sum td.cum{background:var(--sum2-bg);color:var(--sum2-text);}
+tr.vat td.neg,tr.itax td.neg{color:var(--red);}
+/* 自定义税种行 */
+tbody th .del{position:absolute;right:4px;top:50%;transform:translateY(-50%);
+  width:18px;height:18px;line-height:15px;padding:0;border-radius:5px;font-size:11px;
+  border:1px solid var(--line-strong);background:var(--card);color:var(--muted);opacity:.5;}
+tbody tr:hover th .del{opacity:1;}
+tbody th .del:hover{border-color:var(--red);color:var(--red);background:rgba(207,47,34,.08);}
+tbody th.canren{cursor:text;}
+tbody th.canren:hover{background:var(--accent-soft);}
+tbody th .nm{font-style:normal;}
 tr.opt-off{display:none;}
 thead th.cumh{cursor:pointer;background:var(--cum-head);color:var(--cum-text);
   border-right:2px solid var(--line-strong);}
@@ -167,6 +190,9 @@ td.cum.neg{color:var(--red);}
         </div>
       </details>
     </div>
+    <div class="group">
+      <button id="btnAddTax" title="新增一个自定义税种行（如房产税、土地使用税、车船税）">＋ 税种</button>
+    </div>
     <div class="spacer"></div>
     <button id="btnTheme" title="切换外观">浅色</button>
     <button id="btnImport">导入 Excel</button>
@@ -202,12 +228,12 @@ const GRID = [
   {f:"income",    label:"收入合计",        type:"calc"},
   {f:"output",    label:"销项税",          type:"hybrid", tag:"可手改"},
   {f:"inputTax",  label:"进项税",          type:"in",     tag:"手工"},
-  {f:"vat",       label:"增值税",          type:"calc",   tag:"销项−进项", cls:"hl"},
+  {f:"vat",       label:"增值税",          type:"calc",   tag:"销项−进项", cls:"vat"},
   {f:"city",      label:"城市维护建设税",  type:"hybrid", tag:"7%", rk:"city", half:1},
   {f:"edu",       label:"教育费附加",      type:"hybrid", tag:"3%", rk:"edu", half:1},
   {f:"localEdu",  label:"地方教育附加",    type:"hybrid", tag:"2%", rk:"localEdu", half:1},
   {f:"stamp",     label:"印花税",          type:"in",     tag:"选填", opt:"showStamp"},
-  {f:"incomeTax", label:"企业所得税",      type:"in",     tag:"选填", opt:"showIncomeTax"},
+  {f:"incomeTax", label:"企业所得税",      type:"in",     tag:"选填", opt:"showIncomeTax", cls:"itax"},
   {f:"total",     label:"税金合计",        type:"calc",   cls:"sum"}
 ];
 const HYB = ["output","city","edu","localEdu"];
@@ -219,8 +245,18 @@ const defaults = () => ({
   year:new Date().getFullYear(),
   rates:{goods:13,unbilled:13,service:6,city:7,edu:3,localEdu:2},
   halve:true, showStamp:true, showIncomeTax:true, theme:"light",
+  taxes:[],                                   // 自定义税种：[{id:"t1", name:"房产税"}]
+  seq:1,                                      // 自定义税种 id 计数
   months:Array.from({length:N}, blank)
 });
+
+/* 自定义税种的 id 一律以 t 开头，避免和内置字段（goods/output/…）撞名 */
+const newTaxId = () => {
+  let id;
+  do{ id = "t" + (S.seq++); }while(S.months.some(m=>has(m[id])));
+  return id;
+};
+const taxList = () => (S.taxes || []).filter(t=>t && t.id && t.id !== "vat" && t.id !== "total");
 
 function load(){
   const d = defaults();
@@ -231,6 +267,13 @@ function load(){
     const out = Object.assign(d, s);
     out.rates = Object.assign(d.rates, s.rates || {});
     out.months = Array.from({length:N}, (_,i)=>Object.assign(blank(), (s.months||[])[i] || {}));
+    out.taxes = Array.isArray(s.taxes) ? s.taxes.filter(t=>t && t.id && t.id !== "vat" && t.id !== "total") : [];
+    out.seq = Math.max(1, +s.seq || 1);
+    // 老存档可能有税种但 seq 落后，推到位避免 id 重复
+    out.taxes.forEach(t=>{
+      const n = +String(t.id).replace(/^t/,"");
+      if(isFinite(n) && n >= out.seq) out.seq = n + 1;
+    });
     return out;
   }catch(e){ return d; }
 }
@@ -272,9 +315,17 @@ function calcMonth(m){
   const localEdu = manLocal ? r2(num(m.localEduOverride)) : autoLocal;
   const stamp = S.showStamp ? num(m.stamp) : 0;
   const incomeTax = S.showIncomeTax ? num(m.incomeTax) : 0;
-  const total = r2(base + city + edu + localEdu + stamp + incomeTax);
+  let other = 0;
+  const otherDetail = {};
+  taxList().forEach(t=>{
+    const v = num(m[t.id]);
+    otherDetail[t.id] = v;
+    other += v;
+  });
+  other = r2(other);
+  const total = r2(base + city + edu + localEdu + stamp + incomeTax + other);
   return {
-    income, vat, base, stamp, incomeTax, total, city, edu, localEdu, output,
+    income, vat, base, stamp, incomeTax, total, city, edu, localEdu, output, other, otherDetail,
     auto:{output:autoOutput, city:autoCity, edu:autoEdu, localEdu:autoLocal},
     manual:{output:manOutput, city:manCity, edu:manEdu, localEdu:manLocal}
   };
@@ -282,8 +333,24 @@ function calcMonth(m){
 function isBlank(m){
   return !has(m.goods) && !has(m.unbilled) && !has(m.service) && !has(m.inputTax) &&
          !has(m.stamp) && !has(m.incomeTax) &&
-         HYB.every(f=>!has(m[OV(f)]));
+         HYB.every(f=>!has(m[OV(f)])) &&
+         taxList().every(t=>!has(m[t.id]));
 }
+
+/* 实际渲染的行：内置行 + 自定义税种（插在企业所得税之后、税金合计之前） */
+function rowsOf(){
+  const out = [];
+  GRID.forEach(r=>{
+    if(r.opt && !S[r.opt]){
+      if(r.f === "incomeTax") taxList().forEach(t=>out.push(customRow(t)));
+      return;
+    }
+    out.push(r);
+    if(r.f === "incomeTax") taxList().forEach(t=>out.push(customRow(t)));
+  });
+  return out;
+}
+const customRow = t => ({f:t.id, label:t.name, type:"in", tag:"自定", custom:true, tid:t.id});
 
 /* ---------- 建表 ---------- */
 const inputs = {}, calcCells = {}, totalCells = {}, cumCells = {};
@@ -316,10 +383,14 @@ function buildGrid(){
   });
   h += '<th class="tot" title="全年 12 个月合计">' + (collapse && sel > 0 ? "全年合计" : "合计") + '</th></tr></thead><tbody>';
 
-  GRID.forEach(r=>{
+  rowsOf().forEach(r=>{
     h += '<tr data-row="'+r.f+'"'+(r.opt?' data-opt="'+r.opt+'"':'')+(r.cls?' class="'+r.cls+'"':'')+'>';
-    h += '<th>' + r.label + (r.rk ? '<i data-rk="'+r.rk+'"'+(r.half?' data-half="1"':'')+'></i>'
-                              : (r.tag ? '<i>'+r.tag+'</i>' : '')) + '</th>';
+    h += '<th'+(r.custom?' class="canren"':'')+(r.custom?' data-ren="'+r.tid+'" title="双击可重命名"':'')+'>' +
+         '<span class="nm">' + r.label + '</span>' +
+         (r.rk ? '<i data-rk="'+r.rk+'"'+(r.half?' data-half="1"':'')+'></i>'
+               : (r.tag ? '<i>'+r.tag+'</i>' : '')) +
+         (r.custom ? '<button class="del" data-del="'+r.tid+'" title="删除该税种（同时清掉 12 个月的数据）">✕</button>' : '') +
+         '</th>';
     view.forEach(v=>{
       if(v.k === "cum"){
         h += '<td class="cum" data-f="'+r.f+'" data-cum="1"></td>';
@@ -358,6 +429,19 @@ function buildGrid(){
   t.querySelectorAll("td.cum").forEach(td=>{ cumCells[td.dataset.f] = td; });
   t.querySelectorAll("td.tot").forEach(td=>{ totalCells[td.dataset.f] = td; });
 
+  t.querySelectorAll(".del").forEach(b=>{
+    b.addEventListener("click", e=>{
+      e.preventDefault(); e.stopPropagation();
+      delTax(b.dataset.del);
+    });
+  });
+  t.querySelectorAll("th.canren").forEach(th=>{
+    th.addEventListener("dblclick", e=>{
+      if(e.target.classList.contains("del")) return;
+      renTax(th.dataset.ren);
+    });
+  });
+
   monthHeads.forEach(th=>{
     th.addEventListener("click", ()=>{
       const i = +th.dataset.i;
@@ -372,7 +456,40 @@ function buildGrid(){
   const ch = t.querySelector("th.cumh");
   if(ch) ch.addEventListener("click", ()=>{ collapse = false; buildGrid(); syncControls(); paint(); });
 
-  inputOrder = GRID.filter(r=>r.type !== "calc").map(r=>r.f);
+  inputOrder = rowsOf().filter(r=>r.type !== "calc").map(r=>r.f);
+}
+
+/* ---------- 自定义税种 ---------- */
+function addTax(name){
+  const id = newTaxId();
+  const t = {id, name:name || ("新税种" + id.replace(/^t/,""))};
+  S.taxes = taxList().concat(t);
+  buildGrid(); syncControls(); paint(); save();
+  const th = document.querySelector('tbody th[data-ren="' + t.id + '"]');
+  if(th) th.scrollIntoView({block:"center"});
+  toast("已新增税种「" + t.name + "」：双击行标题可改名，右侧 ✕ 可删除");
+  return t;
+}
+function renTax(tid){
+  const t = taxList().find(x=>x.id === tid);
+  if(!t) return;
+  const v = prompt("税种名称（如：房产税、土地使用税、车船税、消费税）", t.name);
+  if(v === null) return;
+  const nm = v.trim().slice(0, 20);
+  if(!nm){ toast("名称不能为空"); return; }
+  t.name = nm;
+  buildGrid(); paint(); save();
+}
+function delTax(tid){
+  const t = taxList().find(x=>x.id === tid);
+  if(!t) return;
+  let filled = 0;
+  S.months.forEach(m=>{ if(has(m[tid])) filled++; });
+  if(filled && !confirm("「" + t.name + "」有 " + filled + " 个月填了金额，删除会一并清掉，确定？")) return;
+  S.taxes = taxList().filter(x=>x.id !== tid);
+  S.months.forEach(m=>{ delete m[tid]; });
+  buildGrid(); syncControls(); paint(); save();
+  toast("已删除税种「" + t.name + "」");
 }
 
 /* ---------- 输入 ---------- */
@@ -409,32 +526,35 @@ function setCalc(td, v, kind, blankMonth){
 }
 
 /* 某区间（含端点）的累计值 */
-const CUM_FIELDS = ["goods","unbilled","service","income","output","inputTax","vat","city","edu","localEdu","stamp","incomeTax","total"];
 function rangeSum(a, b){
-  const o = {}, seen = {};
-  CUM_FIELDS.forEach(f=>{ o[f] = 0; seen[f] = false; });
+  const rows = rowsOf(), o = {}, seen = {};
+  rows.forEach(r=>{ o[r.f] = 0; seen[r.f] = false; });
   let any = false;
   for(let i=a;i<=b;i++){
     const m = S.months[i], c = calcMonth(m);
     if(!isBlank(m)) any = true;
-    ["goods","unbilled","service","inputTax","stamp","incomeTax"].forEach(f=>{
-      o[f] += num(m[f]);
-      if(has(m[f])) seen[f] = true;
+    rows.forEach(r=>{
+      if(r.type === "in"){
+        o[r.f] += num(m[r.f]);
+        if(has(m[r.f])) seen[r.f] = true;
+      }else{
+        o[r.f] += (c[r.f] || 0);
+      }
     });
-    ["income","output","vat","city","edu","localEdu","total"].forEach(f=>{ o[f] += c[f]; });
   }
-  CUM_FIELDS.forEach(f=>{ o[f] = r2(o[f]); });
+  rows.forEach(r=>{ o[r.f] = r2(o[r.f]); });
   return {v:o, seen, any};
 }
 
 function paint(){
   const cols = [];
   for(let i=0;i<N;i++) cols.push(calcMonth(S.months[i]));
+  const rows = rowsOf();
 
   view.forEach(v=>{
     if(v.k === "cum"){
       const {v:cv, seen, any} = rangeSum(v.a, v.b);
-      GRID.forEach(r=>{
+      rows.forEach(r=>{
         const td = cumCells[r.f];
         if(!td) return;
         const dim = !any || (r.type === "in" && !seen[r.f]);
@@ -448,12 +568,9 @@ function paint(){
     const i = v.i, m = S.months[i], c = cols[i];
     const blankMonth = isBlank(m);
 
-    setVal(inputs["goods_" + i], m.goods);
-    setVal(inputs["unbilled_" + i], m.unbilled);
-    setVal(inputs["service_" + i], m.service);
-    setVal(inputs["inputTax_" + i], m.inputTax);
-    setVal(inputs["stamp_" + i], m.stamp);
-    setVal(inputs["incomeTax_" + i], m.incomeTax);
+    rows.filter(r=>r.type === "in").forEach(r=>{
+      setVal(inputs[r.f + "_" + i], m[r.f]);
+    });
 
     HYB.forEach(f=>{
       const el = inputs[f + "_" + i];
@@ -477,13 +594,9 @@ function paint(){
   });
 
   const rawSum = f => r2(S.months.reduce((a,m)=>a + num(m[f]), 0));
-  const compSum = f => r2(cols.reduce((a,c)=>a + c[f], 0));
-  const T = {
-    goods:rawSum("goods"), unbilled:rawSum("unbilled"), service:rawSum("service"), income:compSum("income"),
-    output:compSum("output"), inputTax:rawSum("inputTax"), vat:compSum("vat"),
-    city:compSum("city"), edu:compSum("edu"), localEdu:compSum("localEdu"),
-    stamp:compSum("stamp"), incomeTax:compSum("incomeTax"), total:compSum("total")
-  };
+  const compSum = f => r2(cols.reduce((a,c)=>a + (c[f] || 0), 0));
+  const T = {};
+  rows.forEach(r=>{ T[r.f] = (r.type === "in") ? rawSum(r.f) : compSum(r.f); });
   Object.keys(T).forEach(k=>{
     const td = totalCells[k];
     if(!td) return;
@@ -541,8 +654,11 @@ function paintPanel(){
     '<p>附加税基数 <b>' + fmt(cur.base) + '</b> × ' + k + '：城建 ' + fmt(cur.city) +
     ' ＋ 教育 ' + fmt(cur.edu) + ' ＋ 地方 ' + fmt(cur.localEdu) + '</p>' +
     '<p><b>税金合计 ' + fmt(cur.total) + '</b> ＝ 增值税 ' + fmt(cur.base) + ' ＋ 附加 ' +
-    fmt(r2(cur.city + cur.edu + cur.localEdu)) + ' ＋ 印花税 ' + fmt(cur.stamp) +
-    ' ＋ 企业所得税 ' + fmt(cur.incomeTax) + '</p>';
+    fmt(r2(cur.city + cur.edu + cur.localEdu)) +
+    (S.showStamp ? ' ＋ 印花税 ' + fmt(cur.stamp) : '') +
+    (S.showIncomeTax ? ' ＋ 企业所得税 ' + fmt(cur.incomeTax) : '') +
+    taxList().filter(t=>num(m[t.id]) !== 0).map(t=>' ＋ ' + t.name + ' ' + fmt(num(m[t.id]))).join('') +
+    '</p>';
 }
 function row(label, value, cls){
   return '<dl class="row' + (cls ? " " + cls : "") + '"><dt>' + label + '</dt><dd>' + value + '</dd></dl>';
@@ -692,8 +808,7 @@ function exportExcel(){
 
   const rows = [cols];
 
-  GRID.forEach(r=>{
-    if(r.opt && !S[r.opt]) return;
+  rowsOf().forEach(r=>{
     const line = [{t:"s", v:r.label, s:STY.text}];
     let sum = 0, anyV = false;
     for(let i=0;i<N;i++){
@@ -716,12 +831,12 @@ function exportExcel(){
   const rows2 = [H2.map(v=>({t:"s", v, s:STY.head}))];
 
   const acc = [];
-  let pG=0, pU=0, pS=0, pI=0, pO=0, pN=0, pV=0, pT=0;
+  let pG=0, pU=0, pS=0, pI=0, pO=0, pN=0, pV=0, pT=0, pX=0;
   for(let i=0;i<N;i++){
     const m = S.months[i], c = calcMonth(m);
     pG += num(m.goods); pU += num(m.unbilled); pS += num(m.service);
-    pI += c.income; pO += c.output; pN += num(m.inputTax); pV += c.base; pT += c.total;
-    acc.push({m, c, blank:isBlank(m), pG, pU, pS, pI, pO, pN, pV, pT});
+    pI += c.income; pO += c.output; pN += num(m.inputTax); pV += c.base; pT += c.total; pX += c.other;
+    acc.push({m, c, blank:isBlank(m), pG, pU, pS, pI, pO, pN, pV, pT, pX});
   }
   const last = acc[N-1];
 
@@ -746,6 +861,7 @@ function exportExcel(){
   pushRow("销项税",       a=>a.c.output, a=>a.pO);
   pushRow("进项税",       a=> has(a.m.inputTax) ? num(a.m.inputTax) : null, a=>a.pN);
   pushRow("增值税(应纳)", a=>a.c.base,  a=>a.pV);
+  if(taxList().length) pushRow("其他税种", a=>a.c.other, a=>a.pX);
   pushRow("全部税金",     a=>a.c.total, a=>a.pT);
   pushRow("本月增值税税负率", a=> a.c.income ? a.c.base  / a.c.income : null, ()=>null, 1);
   pushRow("本年增值税税负率", a=> a.pI ? a.pV / a.pI : null, a=> a.pI ? a.pV / a.pI : null, 1);
@@ -876,6 +992,13 @@ const LABELS = {
   "城市维护建设税":"city", "城建税":"city", "教育费附加":"edu", "地方教育附加":"localEdu",
   "地方教育费附加":"localEdu", "印花税":"stamp", "企业所得税":"incomeTax"
 };
+/* 这些行是计算结果或标题，导入时不能当成自定义税种 */
+const SKIP_LABELS = new Set([
+  "项目","月份","合计","全年合计","总额",
+  "收入合计","营业收入合计","税金合计","全部税金","累计税金",
+  "增值税","增值税应纳","应纳增值税","增值税计税基数","其他税种","其他税金",
+  "本月增值税税负率","本年增值税税负率","本月综合税负率","本年综合税负率","税负率"
+]);
 function applyMatrix(matrix){
   let headerIdx = -1, monthCols = {};
   for(let i=0;i<Math.min(matrix.length, 12);i++){
@@ -889,18 +1012,25 @@ function applyMatrix(matrix){
   }
   if(headerIdx < 0) throw new Error("没找到「1月…12月」表头，无法识别格式");
 
-  const picked = {};  // field -> {monthIndex: rawValue}
+  const picked = {};  // field -> {monthIndex: rawValue}；custom:<名称> 表示自定义税种
   for(let i=headerIdx+1;i<matrix.length;i++){
     const row = matrix[i] || [];
     const label = String(row[0]||"").replace(/\s/g,"").replace(/[（(].*?[)）]/g,"").replace(/\d+%$/,"");
-    const field = LABELS[label];
-    if(!field) continue;
+    if(!label) continue;
+    let field = LABELS[label];
+    if(!field){
+      // 认不出来的税种（房产税 / 土地使用税 / 车船税 / 残保金…）建成本地自定义税种
+      if(!/税|金|费/.test(label) || SKIP_LABELS.has(label) || label.length > 20) continue;
+      field = "custom:" + label;
+    }
     picked[field] = picked[field] || {};
     for(const [mn, ci] of Object.entries(monthCols)){
-      const raw = String(row[ci] ?? "").replace(/,/g,"").trim();
-      if(raw !== "" && raw !== "-" && raw !== "—"){
-        const v = parseFloat(raw);
-        if(isFinite(v)) picked[field][+mn-1] = v;
+      const raw = String(row[ci] ?? "").replace(/,/g,"").replace(/\s/g,"").trim();
+      const neg = /^\(.*\)$/.test(raw);            // 会计表的负数写法 (1,234.00)
+      const clean = neg ? raw.slice(1,-1) : raw;
+      if(clean !== "" && clean !== "-" && clean !== "—"){
+        const v = parseFloat(clean);
+        if(isFinite(v)) picked[field][+mn-1] = neg ? -Math.abs(v) : v;
       }
     }
   }
@@ -917,6 +1047,18 @@ function applyMatrix(matrix){
   }
   if(picked.stamp) S.showStamp = true;
   if(picked.incomeTax) S.showIncomeTax = true;
+
+  /* 自定义税种：同名复用已有行，新名称自动建行 */
+  const customIds = [];
+  Object.keys(picked).filter(k=>k.indexOf("custom:") === 0).forEach(k=>{
+    const nm = k.slice(7);
+    let t = taxList().find(x=>x.name === nm);
+    if(!t){ t = {id:newTaxId(), name:nm}; S.taxes = taxList().concat(t); }
+    customIds.push(t.id);
+    for(let i=0;i<N;i++){
+      if(picked[k][i] !== undefined) fresh[i][t.id] = String(picked[k][i]);
+    }
+  });
 
   // 第二次遍历：手改字段与自动值比对，不一致才置为手动值
   let manCount = 0;
@@ -936,20 +1078,26 @@ function applyMatrix(matrix){
     const mm = fresh[i];
     const allZero = DIRECT.every(f => !has(mm[f]) || num(mm[f]) === 0);
     const noMan = MANUAL.every(f => !has(mm[OV(f)]));
-    if(allZero && noMan) fresh[i] = blank();
+    const noCustom = customIds.every(id => !has(mm[id]));
+    if(allZero && noMan && noCustom) fresh[i] = blank();
   }
   S.months = fresh;
-  syncControls(); paint(); save();
-  return manCount;
+  buildGrid(); syncControls(); paint(); save();
+  return {manCount, newTax: customIds.length};
 }
-async function importExcel(file){
-  const name = file.name.toLowerCase();
+function impMsg(r){
+  const p = [];
+  if(r && r.manCount) p.push(r.manCount + " 处手改值");
+  if(r && r.newTax) p.push("新增 " + r.newTax + " 个税种行");
+  return p.length ? "，" + p.join("，") : "";
+}
+async function importExcel(file){  const name = file.name.toLowerCase();
   try{
     if(name.endsWith(".csv")){
       const text = await file.text();
       const matrix = text.split(/\r?\n/).filter(l=>l.trim()).map(l=>l.split(","));
-      const mc = applyMatrix(matrix);
-      toast("已导入 CSV" + (mc ? "，其中 " + mc + " 处为手改值" : ""));
+      const r = applyMatrix(matrix);
+      toast("已导入 CSV" + impMsg(r));
       return;
     }
     if(name.endsWith(".xlsx") || name.endsWith(".xlsm")){
@@ -959,15 +1107,15 @@ async function importExcel(file){
       const dec = new TextDecoder();
       const shared = files["xl/sharedStrings.xml"] ? parseShared(dec.decode(files["xl/sharedStrings.xml"])) : [];
       const matrix = sheetToMatrix(dec.decode(files[sheetKey]), shared);
-      const mc = applyMatrix(matrix);
-      toast("已导入 " + file.name + (mc ? "，其中 " + mc + " 处识别为手改值" : ""));
+      const r = applyMatrix(matrix);
+      toast("已导入 " + file.name + impMsg(r));
       return;
     }
     // .xls / .htm —— 多数是 HTML 表格
     const text = await file.text();
     if(/<table/i.test(text)){
-      const mc = applyMatrix(htmlTableToMatrix(text));
-      toast("已导入 " + file.name + (mc ? "，其中 " + mc + " 处识别为手改值" : ""));
+      const r = applyMatrix(htmlTableToMatrix(text));
+      toast("已导入 " + file.name + impMsg(r));
     }else{
       throw new Error("这个 .xls 不是网页表格格式，请先用 Excel 另存为 .xlsx 再导入");
     }
@@ -989,6 +1137,7 @@ $("btnTheme").addEventListener("click", ()=>{
   S.theme = S.theme === "light" ? "dark" : (S.theme === "dark" ? "auto" : "light");
   applyTheme(); save();
 });
+$("btnAddTax").addEventListener("click", ()=> addTax());
 $("btnExport").addEventListener("click", exportExcel);
 $("btnImport").addEventListener("click", ()=> $("xlsInput").click());
 $("xlsInput").addEventListener("change", e=>{
@@ -1010,8 +1159,14 @@ $("fileInput").addEventListener("change", e=>{
       Object.assign(S, s);
       S.rates = Object.assign({goods:13,unbilled:13,service:6,city:7,edu:3,localEdu:2}, s.rates || {});
       S.months = Array.from({length:N}, (_,i)=>Object.assign(blank(), (s.months||[])[i]||{}));
-      syncControls(); paint(); save();
-      toast("存档已载入");
+      S.taxes = Array.isArray(s.taxes) ? s.taxes.filter(t=>t && t.id && t.id !== "vat" && t.id !== "total") : [];
+      S.seq = Math.max(1, +s.seq || 1);
+      S.taxes.forEach(t=>{
+        const n = +String(t.id).replace(/^t/,"");
+        if(isFinite(n) && n >= S.seq) S.seq = n + 1;
+      });
+      buildGrid(); syncControls(); paint(); save();
+      toast("存档已载入" + (S.taxes.length ? "，含 " + S.taxes.length + " 个自定义税种" : ""));
     }catch(err){ alert("存档格式不对：" + err.message); }
   };
   rd.readAsText(f, "utf-8");
