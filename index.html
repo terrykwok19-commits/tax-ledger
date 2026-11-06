@@ -16,6 +16,7 @@
   --cum-bg:#eef4ff; --cum-head:#d8e4fb; --cum-text:#1e4bc8;
   --vat-bg:#fff1e0; --vat-text:#8a4a00;
   --itax-bg:#f3eeff; --itax-text:#4d2f92;
+  --inc-bg:#e6f6ec; --inc-text:#0d5b3d;
   --sum2-bg:#e4eeff; --sum2-text:#17439c;
 }
 :root[data-theme="dark"]{
@@ -29,6 +30,7 @@
   --cum-bg:#1a2742; --cum-head:#243350; --cum-text:#8db4ff;
   --vat-bg:#33260e; --vat-text:#f0be74;
   --itax-bg:#241f3d; --itax-text:#bda6f2;
+  --inc-bg:#14291f; --inc-text:#68d8a6;
   --sum2-bg:#17233c; --sum2-text:#8fb6ff;
 }
 *{box-sizing:border-box}
@@ -100,19 +102,22 @@ td .undo{display:none;position:absolute;right:1px;top:50%;transform:translateY(-
 td.hybrid.manual .undo{display:block;}
 td .undo:hover{background:var(--manual-bd);color:#fff;}
 td.tot{position:sticky;right:0;z-index:1;background:var(--tot-bg);font-weight:600;border-left:2px solid var(--line-strong);}
-/* 需要突出显示的三行：整行填色（输入格、计算格、合计列、累计列一起走） */
+/* 需要突出显示的四行：整行填色（输入格、计算格、合计列、累计列一起走） */
 tr.vat td,tr.vat th{background:var(--vat-bg);color:var(--vat-text);font-weight:600;}
 tr.vat td input{color:var(--vat-text);}
 tr.itax td,tr.itax th{background:var(--itax-bg);color:var(--itax-text);font-weight:600;}
 tr.itax td input{color:var(--itax-text);}
+tr.inc td,tr.inc th{background:var(--inc-bg);color:var(--inc-text);font-weight:600;}
+tr.inc td input{color:var(--inc-text);}
 tr.sum td,tr.sum th{background:var(--sum2-bg);color:var(--sum2-text);font-weight:600;}
 tr.sum td input{color:var(--sum2-text);}
-tr.vat td.neg,tr.itax td.neg,tr.sum td.neg{color:var(--red);}
-tr.vat td.cum,tr.itax td.cum,tr.sum td.cum{font-weight:600;}
+tr.vat td.neg,tr.itax td.neg,tr.inc td.neg,tr.sum td.neg{color:var(--red);}
+tr.vat td.cum,tr.itax td.cum,tr.inc td.cum,tr.sum td.cum{font-weight:600;}
 tr.vat td.cum{background:var(--vat-bg);color:var(--vat-text);}
 tr.itax td.cum{background:var(--itax-bg);color:var(--itax-text);}
+tr.inc td.cum{background:var(--inc-bg);color:var(--inc-text);}
 tr.sum td.cum{background:var(--sum2-bg);color:var(--sum2-text);}
-tr.vat td.neg,tr.itax td.neg{color:var(--red);}
+tr.vat td.neg,tr.itax td.neg,tr.inc td.neg{color:var(--red);}
 /* 自定义税种行 */
 tbody th .del{position:absolute;right:4px;top:50%;transform:translateY(-50%);
   width:18px;height:18px;line-height:15px;padding:0;border-radius:5px;font-size:11px;
@@ -392,8 +397,9 @@ function viewCols(){
   return v;
 }
 
-/* 行的配色类：增值税橙、企业所得税紫、税金合计蓝 */
+/* 行的配色类：收入合计绿、增值税橙、企业所得税紫、税金合计蓝 */
 const rowCls = r =>
+  r.kind === "sumIncome" ? "inc" :
   r.kind === "vat" ? "vat" :
   r.kind === "total" ? "sum" :
   (r.id === "incomeTax" || r.name === "企业所得税") ? "itax" : "";
