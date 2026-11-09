@@ -1405,8 +1405,15 @@ const SKIP_LABELS = new Set([
   "收入合计","营业收入合计","税金合计","全部税金","累计税金",
   "毛利","毛利率","收入","营业收入",
   "增值税","增值税应纳","应纳增值税","增值税计税基数","其他税种","其他税金",
-  "本月增值税税负率","本年增值税税负率","本月综合税负率","本年综合税负率","税负率"
+  "本月增值税税负率","本年增值税税负率","本月综合税负率","本年综合税负率","税负率",
+  "其他税费","附加税合计","小计","累计","备注","说明"
 ]);
+/* 新行默认税率：名字里带「服务」按 6%，带货物/销售/商品按 13%，其余先给 0（点百分比可改） */
+function guessIncomeRate(name){
+  if(/服务|劳务/.test(name)) return /服务/.test(name) ? 6 : 0;
+  if(/货物|销售|商品|产品/.test(name)) return 13;
+  return 0;
+}
 function applyMatrix(matrix){
   let headerIdx = -1, monthCols = {};
   for(let i=0;i<Math.min(matrix.length, 12);i++){
@@ -1421,16 +1428,19 @@ function applyMatrix(matrix){
   if(headerIdx < 0) throw new Error("没找到「1月…12月」表头，无法识别格式");
 
   /* 第一遍：按首列名称收数。名称就是「行的身份」，跟列位置无关 */
-  const picked = {};
+  const picked = {}, rates = {};
   for(let i=headerIdx+1;i<matrix.length;i++){
     const row = matrix[i] || [];
-    const label = String(row[0]||"").replace(/\s/g,"").replace(/[（(].*?[)）]/g,"").replace(/\d+%$/,"");
+    const raw = String(row[0]||"").replace(/\s/g,"");
+    const rm = raw.match(/(\d+(?:\.\d+)?)%$/);          // 名字末尾带税率的（劳务收入 6%）
+    const label = raw.replace(/[（(].*?[)）]/g,"").replace(/\d+(?:\.\d+)?%$/,"");
     if(!label || SKIP_LABELS.has(label)) continue;
+    if(rm) rates[label] = +rm[1];
     const vals = {};
     for(const [mn, ci] of Object.entries(monthCols)){
-      const raw = String(row[ci] ?? "").replace(/,/g,"").replace(/\s/g,"").trim();
-      const neg = /^\(.*\)$/.test(raw);            // 会计表的负数写法 (1,234.00)
-      const clean = neg ? raw.slice(1,-1) : raw;
+      const cell = String(row[ci] ?? "").replace(/,/g,"").replace(/\s/g,"").trim();
+      const neg = /^\(.*\)$/.test(cell);            // 会计表的负数写法 (1,234.00)
+      const clean = neg ? cell.slice(1,-1) : cell;
       if(clean !== "" && clean !== "-" && clean !== "—"){
         const v = parseFloat(clean);
         if(isFinite(v)) vals[+mn-1] = neg ? -Math.abs(v) : v;
@@ -1451,8 +1461,15 @@ function applyMatrix(matrix){
       if(d){
         row = Object.assign({}, d);
         S.rows.push(row); created.push(row.name);
-      }else if(/税|金|费/.test(label) && label.length <= 20){
-        row = {id:newRowId(), kind:"input", name:label};
+      }else if(label.length <= 20 && /[\u4e00-\u9fa5A-Za-z]/.test(label)){
+        /* 台账里没有这个项目 → 自动建一行。
+           名字像税费（税/金/费/附加/基金）就建成手工税费，否则建成收入项。
+           收入项税率优先用原表里带的（如「劳务收入 6%」），没带就按名字猜，猜不到给 0。 */
+        const isFee = /税|金|费|附加|基金/.test(label);
+        const rate = rates[label] !== undefined ? rates[label] : guessIncomeRate(label);
+        row = isFee
+          ? {id:newRowId(), kind:"input",  name:label}
+          : {id:newRowId(), kind:"income", name:label, rate};
         S.rows.push(row); created.push(row.name);
       }
     }
@@ -1505,12 +1522,15 @@ function applyMatrix(matrix){
   }
   S.months = fresh;
   buildGrid(); syncControls(); paint(); save();
-  return {manCount, newTax: created.length};
+  return {manCount, newTax: created.length, created};
 }
 function impMsg(r){
   const p = [];
   if(r && r.manCount) p.push(r.manCount + " 处手改值");
-  if(r && r.newTax) p.push("新增 " + r.newTax + " 个税种行");
+  if(r && r.newTax){
+    const names = (r.created || []).slice(0,3).join("、") + ((r.created || []).length > 3 ? " 等" : "");
+    p.push("新增 " + r.newTax + " 行（" + names + "）");
+  }
   return p.length ? "，" + p.join("，") : "";
 }
 async function importExcel(file){  const name = file.name.toLowerCase();
