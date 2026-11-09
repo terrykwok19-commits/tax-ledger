@@ -1423,7 +1423,19 @@ function sectionOf(text){
   if(/增值税/.test(text)) return "vat";
   return "fee";
 }
-function applyMatrix(matrix){
+/* 从标题里认公司名：「粤书亚 · 2026 年度税金台账」「金哪达贸易_税金台账_2026」→ 粤书亚 / 金哪达贸易 */
+function guessCompanyFrom(text){
+  let t = String(text || "").replace(/\s/g,"");
+  if(!t) return "";
+  t = t.replace(/[·・|｜\-—_]?(?:19|20)\d{2}年?度?[\s\S]*$/,"");               // 砍掉年份及之后
+  t = t.replace(/[·・|｜\-—_]*(?:税金台账|台账|税负率与利润分析|税负率|利润分析|分析)[\s\S]*$/,"");
+  t = t.replace(/^[·・|｜\-—_]+|[·・|｜\-—_]+$/g,"");
+  /* 剩下这点东西得像个公司名：不能带数字，也不能还残留「台账 / 月度 / 合计」这类字样 */
+  if(t.length < 2 || t.length > 30) return "";
+  if(/\d/.test(t) || /月|表|台账|税负|利润|合计|分析|年度/.test(t)) return "";
+  return t;
+}
+function applyMatrix(matrix, fileName){
   let headerIdx = -1, monthCols = {};
   for(let i=0;i<Math.min(matrix.length, 12);i++){
     const row = matrix[i] || [];
@@ -1435,6 +1447,21 @@ function applyMatrix(matrix){
     if(Object.keys(found).length >= 3){ headerIdx = i; monthCols = found; break; }
   }
   if(headerIdx < 0) throw new Error("没找到「1月…12月」表头，无法识别格式");
+
+  /* 公司名：先看表头之上那行合并标题，再退回文件名 */
+  let company = "";
+  for(let i=0;i<headerIdx;i++){
+    const cells = (matrix[i] || []).map(c=>String(c ?? "").trim()).filter(Boolean);
+    if(cells.length === 1 && /台账|税负率|利润分析|年度/.test(cells[0])){
+      company = guessCompanyFrom(cells[0]);
+      if(company) break;
+    }
+  }
+  if(!company && fileName && /台账|税负率|分析/.test(fileName)){
+    company = guessCompanyFrom(String(fileName).replace(/\.[^.]+$/,""));
+  }
+  const companyNew = (company && company !== S.company) ? company : "";
+  if(companyNew) S.company = companyNew;
 
   /* 第一遍：按首列名称收数。名称就是「行的身份」，跟列位置无关。
      同时记下每一项出现在哪个分节（基础经营数据 / 增值税 / 附加税及其他），
@@ -1557,10 +1584,11 @@ function applyMatrix(matrix){
   }
   S.months = fresh;
   buildGrid(); syncControls(); paint(); save();
-  return {manCount, newTax: created.length, created, converted};
+  return {manCount, newTax: created.length, created, converted, company: companyNew};
 }
 function impMsg(r){
   const p = [];
+  if(r && r.company) p.push("公司名取用「" + r.company + "」");
   if(r && r.manCount) p.push(r.manCount + " 处手改值");
   if(r && r.newTax){
     const names = (r.created || []).slice(0,3).join("、") + ((r.created || []).length > 3 ? " 等" : "");
@@ -1577,7 +1605,7 @@ async function importExcel(file){  const name = file.name.toLowerCase();
     if(name.endsWith(".csv")){
       const text = await file.text();
       const matrix = text.split(/\r?\n/).filter(l=>l.trim()).map(l=>l.split(","));
-      const r = applyMatrix(matrix);
+      const r = applyMatrix(matrix, file.name);
       toast("已导入 CSV" + impMsg(r));
       return;
     }
@@ -1588,14 +1616,14 @@ async function importExcel(file){  const name = file.name.toLowerCase();
       const dec = new TextDecoder();
       const shared = files["xl/sharedStrings.xml"] ? parseShared(dec.decode(files["xl/sharedStrings.xml"])) : [];
       const matrix = sheetToMatrix(dec.decode(files[sheetKey]), shared);
-      const r = applyMatrix(matrix);
+      const r = applyMatrix(matrix, file.name);
       toast("已导入 " + file.name + impMsg(r));
       return;
     }
     // .xls / .htm —— 多数是 HTML 表格
     const text = await file.text();
     if(/<table/i.test(text)){
-      const r = applyMatrix(htmlTableToMatrix(text));
+      const r = applyMatrix(htmlTableToMatrix(text), file.name);
       toast("已导入 " + file.name + impMsg(r));
     }else{
       throw new Error("这个 .xls 不是网页表格格式，请先用 Excel 另存为 .xlsx 再导入");
