@@ -1435,6 +1435,32 @@ function guessCompanyFrom(text){
   if(/\d/.test(t) || /月|表|台账|税负|利润|合计|分析|年度/.test(t)) return "";
   return t;
 }
+/* 从标题 / 文件名里认年月：
+   「粤书亚 · 2026 年度税金台账」→ 2026；「2026年10月」/「10月税金表」→ 10；
+   「2026年度（1–10月）」→ 年份 2026、当前月 10 */
+function parsePeriod(text){
+  const t = String(text || "").replace(/\s/g,"");
+  const out = {year:0, month:0, from:0};
+  const y = t.match(/(?:19|20)\d{2}/);
+  if(y) out.year = +y[0];
+  /* 区间写法 1-10月 / 1至10月 / 1～10月：结束月当「当前月」 */
+  const rng = t.match(/(\d{1,2})\s*[-~—–至到]\s*(\d{1,2})月/);
+  if(rng){
+    const a = +rng[1], b = +rng[2];
+    if(a >= 1 && a <= 12 && b >= a && b <= 12){ out.from = a; out.month = b; }
+  }
+  if(!out.month){
+    const ms = (t.match(/(\d{1,2})月/g) || [])
+      .map(s=>+s.replace("月","")).filter(n=>n >= 1 && n <= 12);
+    if(ms.length){ out.from = Math.min(...ms); out.month = Math.max(...ms); }
+  }
+  /* 2026-10 / 2026.10 / 2026/10 这种写法 */
+  if(!out.month){
+    const m2 = t.match(/(?:19|20)\d{2}\s*[年.\-_/]\s*(\d{1,2})(?!\d)/);
+    if(m2){ const n = +m2[1]; if(n >= 1 && n <= 12) out.month = n; }
+  }
+  return out;
+}
 function applyMatrix(matrix, fileName){
   let headerIdx = -1, monthCols = {};
   for(let i=0;i<Math.min(matrix.length, 12);i++){
@@ -1448,20 +1474,33 @@ function applyMatrix(matrix, fileName){
   }
   if(headerIdx < 0) throw new Error("没找到「1月…12月」表头，无法识别格式");
 
-  /* 公司名：先看表头之上那行合并标题，再退回文件名 */
-  let company = "";
+  /* 表头之上那几行标题：公司名、年份、月份都从这里取，取不到再退回文件名 */
+  const titleTexts = [];
   for(let i=0;i<headerIdx;i++){
     const cells = (matrix[i] || []).map(c=>String(c ?? "").trim()).filter(Boolean);
-    if(cells.length === 1 && /台账|税负率|利润分析|年度/.test(cells[0])){
-      company = guessCompanyFrom(cells[0]);
-      if(company) break;
-    }
+    if(cells.length) titleTexts.push(cells.join(" "));
+  }
+  const stem = String(fileName || "").replace(/\.[^.]+$/,"");
+
+  let company = "";
+  for(const tx of titleTexts){
+    if(!/台账|税负率|利润分析|年度/.test(tx)) continue;
+    company = guessCompanyFrom(tx);
+    if(company) break;
   }
   if(!company && fileName && /台账|税负率|分析/.test(fileName)){
-    company = guessCompanyFrom(String(fileName).replace(/\.[^.]+$/,""));
+    company = guessCompanyFrom(stem);
   }
   const companyNew = (company && company !== S.company) ? company : "";
   if(companyNew) S.company = companyNew;
+
+  /* 年份 / 月份：标题优先，文件名兜底。年份只认 2000–2100，避免把合计数年份化 */
+  const tP = titleTexts.map(parsePeriod).filter(p=>p.year || p.month)[0] || {};
+  const fP = parsePeriod(stem);
+  const yearGot = tP.year || fP.year || 0;
+  const monthGot = (tP.month || fP.month || 0);
+  const yearNew = (yearGot >= 2000 && yearGot <= 2100 && yearGot !== S.year) ? yearGot : 0;
+  if(yearNew) S.year = yearNew;
 
   /* 第一遍：按首列名称收数。名称就是「行的身份」，跟列位置无关。
      同时记下每一项出现在哪个分节（基础经营数据 / 增值税 / 附加税及其他），
@@ -1583,12 +1622,32 @@ function applyMatrix(matrix, fileName){
     if(allZero) fresh[i] = blank();
   }
   S.months = fresh;
+
+  /* 视图跟着文件走：文件写了月份就跳到那个月；没写就跳到最后一个有金额的月 */
+  let monthIdx = -1;
+  if(monthGot >= 1 && monthGot <= N) monthIdx = monthGot - 1;
+  else{
+    let lastAny = -1;
+    for(let i=0;i<N;i++){
+      const m = fresh[i];
+      if(isBlank(m)) continue;
+      lastAny = i;
+      if(Object.keys(m).some(k=>Math.abs(num(m[k])) > 0.004)) monthIdx = i;
+    }
+    if(monthIdx < 0) monthIdx = lastAny;
+  }
+  if(monthIdx >= 0){ sel = monthIdx; collapse = false; }
+
   buildGrid(); syncControls(); paint(); save();
-  return {manCount, newTax: created.length, created, converted, company: companyNew};
+  return {manCount, newTax: created.length, created, converted, company: companyNew,
+          year: yearNew, month: monthIdx >= 0 ? monthIdx + 1 : 0, monthFromFile: !!monthGot};
 }
 function impMsg(r){
   const p = [];
   if(r && r.company) p.push("公司名取用「" + r.company + "」");
+  if(r && r.year) p.push("年度切到 " + r.year);
+  if(r && r.month) p.push(r.monthFromFile ? "定位到 " + r.month + " 月"
+                                          : "定位到有数据的 " + r.month + " 月");
   if(r && r.manCount) p.push(r.manCount + " 处手改值");
   if(r && r.newTax){
     const names = (r.created || []).slice(0,3).join("、") + ((r.created || []).length > 3 ? " 等" : "");
