@@ -17,6 +17,7 @@
   --vat-bg:#efe6ff; --vat-text:#53279b;
   --inc-bg:#e6f6ec; --inc-text:#0d5b3d;
   --sum2-bg:#e4eeff; --sum2-text:#17439c;
+  --sep-band:rgba(37,99,235,.09); --sep-line:rgba(37,99,235,.45);
 }
 :root[data-theme="dark"]{
   --bg:#0f1319; --card:#171d26; --line:#252e3b; --line-strong:#374354;
@@ -30,6 +31,7 @@
   --vat-bg:#251d40; --vat-text:#c3a6ff;
   --inc-bg:#14291f; --inc-text:#68d8a6;
   --sum2-bg:#17233c; --sum2-text:#8fb6ff;
+  --sep-band:rgba(91,147,248,.14); --sep-line:rgba(91,147,248,.55);
 }
 *{box-sizing:border-box}
 html,body{margin:0;background:var(--bg);color:var(--text);
@@ -113,6 +115,9 @@ tr.vat td.cum{background:var(--vat-bg);color:var(--vat-text);}
 tr.inc td.cum{background:var(--inc-bg);color:var(--inc-text);}
 tr.sum td.cum{background:var(--sum2-bg);color:var(--sum2-text);}
 tr.vat td.neg,tr.inc td.neg{color:var(--red);}
+/* 分节线：经营数据（毛利率）与增值税（销项税）之间 */
+tr.sep td,tr.sep th{border-top:2px solid var(--sep-line);
+  background-image:linear-gradient(to bottom,var(--sep-band),transparent 8px);}
 /* 行拖动排序 */
 tbody th .grip{display:inline-block;width:8px;height:12px;margin-right:5px;vertical-align:-1px;
   cursor:grab;opacity:.3;
@@ -507,7 +512,10 @@ function buildGrid(){
 
   rowsOf().forEach(r=>{
     const cls = rowCls(r), movable = KINDS.indexOf(r.kind) >= 0;
-    h += '<tr data-row="'+r.id+'"'+(movable ? ' data-drag="1"' : '')+(cls ? ' class="'+cls+'"' : '')+'>';
+    /* 销项税这一行是「经营数据 / 增值税」的分界，加一条分隔线 */
+    const sep = r.id === FIXED.output.id ? "sep" : "";
+    const all = (cls + " " + sep).trim();
+    h += '<tr data-row="'+r.id+'"'+(movable ? ' data-drag="1"' : '')+(all ? ' class="'+all+'"' : '')+'>';
     h += '<th'+(movable ? ' class="canren" data-ren="'+r.id+'" title="按住拖动可调整上下顺序；双击重命名；点百分比改税率；✕ 删除"' : '')+'>' +
          (movable ? '<span class="grip" aria-hidden="true"></span>' : '') +
          '<span class="nm">' + esc(r.name) + '</span>' + rateTag(r) +
