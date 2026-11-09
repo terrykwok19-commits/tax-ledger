@@ -48,6 +48,7 @@ h1{font-size:19px;font-weight:600;margin:0;letter-spacing:.3px;}
 .field{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:12.5px;}
 .field input{width:76px;border:1px solid var(--line-strong);border-radius:7px;padding:5px 8px;
   font:inherit;font-variant-numeric:tabular-nums;background:var(--card);color:var(--text);}
+.field input#company{width:168px;text-align:left;}
 .switch{display:inline-flex;align-items:center;gap:7px;cursor:pointer;user-select:none;font-size:12.5px;}
 .switch input{position:absolute;opacity:0;pointer-events:none;}
 .track{width:36px;height:20px;border-radius:20px;background:#868f9c;position:relative;transition:background .15s;flex:0 0 auto;}
@@ -184,6 +185,7 @@ td.cum.neg{color:var(--red);}
 
   <div class="bar">
     <div class="group">
+      <label class="field">公司 <input id="company" type="text" maxlength="30" placeholder="填写公司名称" title="填公司名称，会带到页面标题和导出的 Excel 里"></label>
       <label class="field">年度 <input id="year" type="number" min="2000" max="2100" step="1"></label>
     </div>
     <div class="group">
@@ -259,6 +261,7 @@ const isPctRow = r => !!r && r.kind === "margin";
 
 const blank = () => ({});
 const defaults = () => ({
+  company:"金哪达贸易",
   year:new Date().getFullYear(),
   halve:true, theme:"light",
   rows:DEF_ROWS.map(r=>Object.assign({}, r)),
@@ -977,13 +980,14 @@ window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", ()=
 
 /* ---------- 控件 ---------- */
 function syncControls(){
+  $("company").value = S.company || "";
   $("year").value = S.year;
   $("halve").checked = S.halve;
 
   const ordRows = rowsOf();
   const incs  = ordRows.filter(r=>r.kind === "income");
   const rates = ordRows.filter(r=>r.kind === "vatRate");
-  $("subTitle").textContent = S.year + " 年度 · " +
+  $("subTitle").textContent = (S.company ? S.company + " · " : "") + S.year + " 年度 · " +
     (incs.length ? incs.map(r=>r.name + " " + num(r.rate) + "%").join(" / ") : "无收入项");
   $("halveHint").textContent = !rates.length ? "无附加税费" : (S.halve
     ? rates.slice(0,3).map(r=>r.name + " " + (num(r.rate)/2) + "%").join(" / ") + (rates.length > 3 ? " …" : "")
@@ -1132,6 +1136,8 @@ function exportExcel(){
   const lastCol = colName(W);
   const merges = [];
   const rows = [];
+  /* 公司名称：控制栏里填的那个，留空就只写「年度税金台账」 */
+  const co = String(S.company || "").trim();
 
   /* 逐月数据 + 累计 */
   const months = [];
@@ -1157,7 +1163,7 @@ function exportExcel(){
   const pctCell = (v, s) => (v === null || v === undefined) ? {empty:true, s} : {t:"n", v, s};
 
   /* 标题条（深蓝底金字，整行合并） */
-  rows.push({ht:30, cells:[{t:"s", v:"金哪达贸易 · " + S.year + " 年度税金台账", s:STY.title}]});
+  rows.push({ht:30, cells:[{t:"s", v:(co ? co + " · " : "") + S.year + " 年度税金台账", s:STY.title}]});
   merges.push("A1:" + lastCol + "1");
 
   /* 表头 */
@@ -1230,7 +1236,7 @@ function exportExcel(){
 
   /* 工作表2：税负率与利润分析（月份为列） */
   const rows2 = [];
-  rows2.push({ht:28, cells:[{t:"s", v:"税负率与利润分析 · " + S.year + " 年度", s:STY.title}]});
+  rows2.push({ht:28, cells:[{t:"s", v:(co ? co + " · " : "") + "税负率与利润分析 · " + S.year + " 年度", s:STY.title}]});
   const H2 = [{t:"s", v:"项目", s:STY.head}];
   for(let i=0;i<N;i++) H2.push({t:"s", v:(i+1)+"月", s:STY.head});
   H2.push({t:"s", v:"全年累计", s:STY.head});
@@ -1298,7 +1304,7 @@ function exportExcel(){
     {name:"xl/worksheets/sheet1.xml", data:enc.encode(sheetXml(rows, merges, 1))},
     {name:"xl/worksheets/sheet2.xml", data:enc.encode(sheetXml(rows2, merges2, 1))}
   ];
-  download(zipStore(files), "税金台账_" + S.year + ".xlsx");
+  download(zipStore(files), (co ? co + "_" : "") + "税金台账_" + S.year + ".xlsx");
   toast("已导出 xlsx（含明细台账 + 税负率两个工作表）");
 }
 
@@ -1541,6 +1547,13 @@ async function importExcel(file){  const name = file.name.toLowerCase();
 }
 
 /* ---------- 事件 ---------- */
+$("company").addEventListener("input", e=>{
+  S.company = e.target.value.slice(0,30);
+  $("subTitle").textContent = (S.company ? S.company + " · " : "") + S.year + " 年度 · " +
+    rowsOf().filter(r=>r.kind === "income").map(r=>r.name + " " + num(r.rate) + "%").join(" / ");
+  save();
+});
+$("company").addEventListener("blur", ()=> syncControls());
 $("year").addEventListener("change", e=>{ S.year = +e.target.value || S.year; syncControls(); save(); });
 $("halve").addEventListener("change", e=>{ S.halve = e.target.checked; syncControls(); paint(); save(); });
 $("addIncome").addEventListener("click", ()=> addRow("income"));
