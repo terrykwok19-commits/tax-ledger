@@ -1045,19 +1045,28 @@ function zipStore(entries){
 const esc = s => String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
 const colName = n => { let s=""; while(n>0){ const m=(n-1)%26; s=String.fromCharCode(65+m)+s; n=(n-m-1)/26; } return s; };
 
-const STY = {head:1, num:2, pct:3, text:4};
-function sheetXml(rows){
+const STY = {head:1, num:2, pct:3, text:4, title:5, sec:6, red:7, totL:8, totN:9, totP:10};
+function sheetXml(rows, merges, freeze){
   let x = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
     '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
-    '<cols><col min="1" max="1" width="24" customWidth="1"/><col min="2" max="14" width="15.5" customWidth="1"/></cols>' +
+    '<sheetViews><sheetView workbookViewId="0">' +
+    (freeze ? '<pane xSplit="1" ySplit="2" topLeftCell="B3" activePane="bottomRight" state="frozen"/>' : '') +
+    '</sheetView></sheetViews>' +
+    '<sheetFormatPr defaultRowHeight="18"/>' +
+    '<cols><col min="1" max="1" width="26" customWidth="1"/>' +
+    '<col min="2" max="13" width="13.5" customWidth="1"/>' +
+    '<col min="14" max="14" width="15" customWidth="1"/></cols>' +
     '<sheetData>';
-  rows.forEach((cells, ri)=>{
+  rows.forEach((row, ri)=>{
     const r = ri + 1;
-    x += '<row r="'+r+'">';
+    const cells = row.cells || row;
+    const ht = row.ht ? ' ht="' + row.ht + '" customHeight="1"' : '';
+    x += '<row r="'+r+'"'+ht+'>';
     cells.forEach((c, ci)=>{
       if(c === null || c === undefined) return;
       const ref = colName(ci+1) + r;
       const st = c.s ? ' s="'+c.s+'"' : '';
+      if(c.empty){ x += '<c r="'+ref+'"'+st+'/>'; return; }
       if(c.t === "s"){
         x += '<c r="'+ref+'"'+st+' t="inlineStr"><is><t xml:space="preserve">'+esc(c.v)+'</t></is></c>';
       }else{
@@ -1066,69 +1075,61 @@ function sheetXml(rows){
     });
     x += '</row>';
   });
-  return x + '</sheetData></worksheet>';
+  x += '</sheetData>';
+  if(merges && merges.length){
+    x += '<mergeCells count="'+merges.length+'">' +
+         merges.map(m=>'<mergeCell ref="'+m+'"/>').join('') + '</mergeCells>';
+  }
+  return x + '</worksheet>';
 }
 
+/* 样式：深蓝标题条 + 绿色分节带 + 浅灰数值格 + 红色计算项文字（仿金哪达 Excel 模板） */
 const STYLES_XML = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
 '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
 '<numFmts count="2"><numFmt numFmtId="164" formatCode="#,##0.00"/><numFmt numFmtId="165" formatCode="0.00%"/></numFmts>' +
-'<fonts count="2"><font><sz val="11"/><name val="等线"/></font>' +
-'<font><b/><sz val="11"/><name val="等线"/></font></fonts>' +
-'<fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill>' +
-'<fill><patternFill patternType="solid"><fgColor rgb="FFEAEFF6"/><bgColor indexed="64"/></patternFill></fill></fills>' +
+'<fonts count="4">' +
+'<font><sz val="11"/><name val="等线"/></font>' +
+'<font><b/><sz val="11"/><name val="等线"/></font>' +
+'<font><b/><sz val="11"/><color rgb="FFC00000"/><name val="等线"/></font>' +
+'<font><b/><sz val="14"/><color rgb="FFFFF2CC"/><name val="等线"/></font>' +
+'</fonts>' +
+'<fills count="6">' +
+'<fill><patternFill patternType="none"/></fill>' +
+'<fill><patternFill patternType="gray125"/></fill>' +
+'<fill><patternFill patternType="solid"><fgColor rgb="FFEAEFF6"/><bgColor indexed="64"/></patternFill></fill>' +
+'<fill><patternFill patternType="solid"><fgColor rgb="FF1F4E79"/><bgColor indexed="64"/></patternFill></fill>' +
+'<fill><patternFill patternType="solid"><fgColor rgb="FFC6E0B4"/><bgColor indexed="64"/></patternFill></fill>' +
+'<fill><patternFill patternType="solid"><fgColor rgb="FFF3F6FA"/><bgColor indexed="64"/></patternFill></fill>' +
+'</fills>' +
 '<borders count="2"><border><left/><right/><top/><bottom/><diagonal/></border>' +
-'<border><left style="thin"><color rgb="FFD0D7E2"/></left><right style="thin"><color rgb="FFD0D7E2"/></right>' +
-'<top style="thin"><color rgb="FFD0D7E2"/></top><bottom style="thin"><color rgb="FFD0D7E2"/></bottom><diagonal/></border></borders>' +
+'<border><left style="thin"><color rgb="FFB4BCC6"/></left><right style="thin"><color rgb="FFB4BCC6"/></right>' +
+'<top style="thin"><color rgb="FFB4BCC6"/></top><bottom style="thin"><color rgb="FFB4BCC6"/></bottom><diagonal/></border></borders>' +
 '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>' +
-'<cellXfs count="5">' +
+'<cellXfs count="11">' +
 '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>' +
-'<xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1"/>' +
-'<xf numFmtId="164" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1"/>' +
-'<xf numFmtId="165" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1"/>' +
-'<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1"/>' +
+/* 1 表头 */ '<xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>' +
+/* 2 金额 */ '<xf numFmtId="164" fontId="0" fillId="5" borderId="1" xfId="0" applyNumberFormat="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="right" vertical="center"/></xf>' +
+/* 3 百分比 */ '<xf numFmtId="165" fontId="0" fillId="5" borderId="1" xfId="0" applyNumberFormat="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="right" vertical="center"/></xf>' +
+/* 4 普通项目名 */ '<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1"><alignment horizontal="left" vertical="center"/></xf>' +
+/* 5 标题条 */ '<xf numFmtId="0" fontId="3" fillId="3" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>' +
+/* 6 分节带 */ '<xf numFmtId="0" fontId="1" fillId="4" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="left" vertical="center"/></xf>' +
+/* 7 红色计算项 */ '<xf numFmtId="0" fontId="2" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="left" vertical="center"/></xf>' +
+/* 8 合计行项目名 */ '<xf numFmtId="0" fontId="1" fillId="4" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="left" vertical="center"/></xf>' +
+/* 9 合计行金额 */ '<xf numFmtId="164" fontId="1" fillId="4" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="right" vertical="center"/></xf>' +
+/* 10 合计行百分比 */ '<xf numFmtId="165" fontId="1" fillId="4" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="right" vertical="center"/></xf>' +
 '</cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>';
 
 function exportExcel(){
-  const cols = [{t:"s",v:"项目",s:STY.head}];
-  for(let i=0;i<N;i++) cols.push({t:"s",v:(i+1)+"月",s:STY.head});
-  cols.push({t:"s",v:"合计",s:STY.head});
+  const W = 1 + N + 1;
+  const lastCol = colName(W);
+  const merges = [];
+  const rows = [];
 
-  const rows = [cols];
-
-  rowsOf().forEach(r=>{
-    const line = [{t:"s", v:r.name, s:STY.text}];
-    const pctRow = isPctRow(r);
-    let sum = 0, anyV = false, sumG = 0, sumI = 0;
-    for(let i=0;i<N;i++){
-      const m = S.months[i], c = calcMonth(m);
-      if(isBlank(m)){ line.push(null); continue; }
-      if(isEdit(r) && !has(m[r.id])){ line.push(null); continue; }
-      if(pctRow){
-        const mv = c.vals.margin;
-        if(mv === null || mv === undefined){ line.push(null); }
-        else { line.push({t:"n", v:mv, s:STY.pct}); }
-        if(c.costFilled){ sumG += c.gross; sumI += c.income; anyV = true; }
-        continue;
-      }
-      const v = isEdit(r) ? num(m[r.id]) : c.vals[r.id];
-      if(v === null || v === undefined){ line.push(null); continue; }
-      sum += v; anyV = true;
-      line.push({t:"n", v:r2(v), s:STY.num});
-    }
-    if(pctRow) line.push(anyV && sumI ? {t:"n", v:sumG / sumI, s:STY.pct} : null);
-    else       line.push(anyV ? {t:"n", v:r2(sum), s:STY.num} : null);
-    rows.push(line);
-  });
-
-  /* 工作表2：月份为列、类目为行 */
-  const H2 = ["项目"];
-  for(let i=0;i<N;i++) H2.push((i+1)+"月");
-  H2.push("全年累计");
-  const rows2 = [H2.map(v=>({t:"s", v, s:STY.head}))];
-
+  /* 逐月数据 + 累计 */
+  const months = [];
   const incRows = rowsOf().filter(r=>r.kind === "income");
   const rateRows = rowsOf().filter(r=>r.kind === "vatRate");
-  const acc = [];
+  const feeRows = rowsOf().filter(r=>r.kind === "input");
   let pI=0, pO=0, pN=0, pV=0, pT=0, pX=0, pC=0, pG=0;
   const pInc = {}, pRate = {};
   incRows.forEach(r=>{ pInc[r.id] = 0; });
@@ -1139,44 +1140,125 @@ function exportExcel(){
     rateRows.forEach(r=>{ pRate[r.id] += (c.vals[r.id] || 0); });
     pI += c.income; pO += c.output; pN += num(m.inputTax); pV += c.base; pT += c.total; pX += c.other;
     pC += c.cost; pG += (c.gross || 0);
-    acc.push({m, c, blank:isBlank(m), pI, pO, pN, pV, pT, pX, pC, pG,
-              pInc:Object.assign({}, pInc), pRate:Object.assign({}, pRate)});
+    months.push({i, m, c, blank:isBlank(m), pI, pO, pN, pV, pT, pX, pC, pG,
+                 pInc:Object.assign({}, pInc), pRate:Object.assign({}, pRate)});
   }
-  const last = acc[N-1];
+  const last = months[N-1];
 
-  const pushRow = (label, monthFn, totalFn, isPct) => {
-    const line = [{t:"s", v:label, s:isPct ? STY.head : STY.text}];
-    for(let i=0;i<N;i++){
-      const a = acc[i];
+  const numCell = (v, s) => (v === null || v === undefined) ? {empty:true, s} : {t:"n", v:r2(v), s};
+  const pctCell = (v, s) => (v === null || v === undefined) ? {empty:true, s} : {t:"n", v, s};
+
+  /* 标题条（深蓝底金字，整行合并） */
+  rows.push({ht:30, cells:[{t:"s", v:"金哪达贸易 · " + S.year + " 年度税金台账", s:STY.title}]});
+  merges.push("A1:" + lastCol + "1");
+
+  /* 表头 */
+  const head = [{t:"s", v:"项目", s:STY.head}];
+  for(let i=0;i<N;i++) head.push({t:"s", v:(i+1)+"月", s:STY.head});
+  head.push({t:"s", v:"合计", s:STY.head});
+  rows.push({ht:22, cells:head});
+
+  const section = txt => {
+    rows.push({ht:21, cells:[{t:"s", v:txt, s:STY.sec}]});
+    merges.push("A" + rows.length + ":" + lastCol + rows.length);
+  };
+
+  /* 一行数据：项目名 + 12 个月 + 合计（金额/百分比自动判断） */
+  const addRow = (r, opts) => {
+    opts = opts || {};
+    const lstyle = opts.tot ? STY.totL : (opts.red ? STY.red : STY.text);
+    const ns = opts.tot ? STY.totN : STY.num;
+    const ps = opts.tot ? STY.totP : STY.pct;
+    const asPct = isPctRow(r);
+    const cells = [{t:"s", v:opts.name || r.name, s:lstyle}];
+    let sum = 0, any = false, sumG = 0, sumI = 0;
+    months.forEach(a=>{
+      const m = a.m, c = a.c;
+      if(asPct){
+        const v = (a.blank || !c.costFilled) ? null : c.margin;
+        cells.push(pctCell(v, ps));
+        if(!a.blank && c.costFilled){ sumG += c.gross; sumI += c.income; any = true; }
+        return;
+      }
+      let v = null;
+      if(!a.blank) v = isEdit(r) ? (has(m[r.id]) ? num(m[r.id]) : null) : c.vals[r.id];
+      cells.push(numCell(v, ns));
+      if(v !== null && v !== undefined){ sum += v; any = true; }
+    });
+    cells.push(asPct ? pctCell(any && sumI ? sumG / sumI : null, ps)
+                     : numCell(any ? sum : null, ns));
+    rows.push({cells});
+  };
+
+  section("一、基础经营数据");
+  incRows.forEach(r=>addRow(r));
+  addRow(FIXED.income, {red:true});
+  addRow(FIXED.cost);
+  addRow(FIXED.gross, {red:true});
+  addRow(FIXED.margin, {red:true});
+
+  section("二、增值税计算明细");
+  addRow(FIXED.output);
+  addRow(FIXED.inputTax);
+  addRow(FIXED.vat, {red:true});
+
+  section("三、附加税及其他税种明细");
+  rateRows.forEach(r=>addRow(r));
+  feeRows.forEach(r=>addRow(r));
+  addRow(FIXED.total, {tot:true});
+
+  section("四、税负分析");
+  [
+    ["本月增值税税负率", a=> a.c.income ? a.c.base / a.c.income : null, ()=>null],
+    ["本年增值税税负率", a=> a.pI ? a.pV / a.pI : null,              a=> a.pI ? a.pV / a.pI : null],
+    ["本月综合税负率",   a=> a.c.income ? a.c.total / a.c.income : null, ()=>null],
+    ["本年综合税负率",   a=> a.pI ? a.pT / a.pI : null,              a=> a.pI ? a.pT / a.pI : null]
+  ].forEach(pair=>{
+    const cells = [{t:"s", v:pair[0], s:STY.red}];
+    months.forEach(a=>{ cells.push(pctCell(a.blank ? null : pair[1](a), STY.pct)); });
+    cells.push(pctCell(pair[2](last), STY.pct));
+    rows.push({cells});
+  });
+
+  /* 工作表2：税负率与利润分析（月份为列） */
+  const rows2 = [];
+  rows2.push({ht:28, cells:[{t:"s", v:"税负率与利润分析 · " + S.year + " 年度", s:STY.title}]});
+  const H2 = [{t:"s", v:"项目", s:STY.head}];
+  for(let i=0;i<N;i++) H2.push({t:"s", v:(i+1)+"月", s:STY.head});
+  H2.push({t:"s", v:"全年累计", s:STY.head});
+  rows2.push({ht:22, cells:H2});
+  const merges2 = ["A1:" + lastCol + "1"];
+
+  const pushRow = (label, monthFn, totalFn, isPct, red) => {
+    const line = [{t:"s", v:label, s:red ? STY.red : STY.text}];
+    months.forEach(a=>{
       const v = a.blank ? null : monthFn(a);
-      line.push(v === null || v === undefined ? null
-        : {t:"n", v: isPct ? v : r2(v), s: isPct ? STY.pct : STY.num});
-    }
+      line.push(isPct ? pctCell(v, STY.pct) : numCell(v, STY.num));
+    });
     const t = totalFn(last);
-    line.push(t === null || t === undefined ? null
-      : {t:"n", v: isPct ? t : r2(t), s: isPct ? STY.pct : STY.num});
-    rows2.push(line);
+    line.push(isPct ? pctCell(t, STY.pct) : numCell(t, STY.num));
+    rows2.push({cells:line});
   };
 
   incRows.forEach(r=>{
     pushRow(r.name, a=> has(a.m[r.id]) ? num(a.m[r.id]) : null, a=>a.pInc[r.id]);
   });
-  pushRow("收入合计",     a=>a.c.income, a=>a.pI);
+  pushRow("收入合计",     a=>a.c.income, a=>a.pI, 0, 1);
   pushRow("主营业务成本", a=> a.c.costFilled ? a.c.cost : null, a=> a.pC ? a.pC : null);
-  pushRow("毛利",         a=> a.c.gross, a=> a.pC ? a.pG : null);
-  pushRow("毛利率",       a=> a.c.margin, a=> a.pI && a.pC ? a.pG / a.pI : null, 1);
+  pushRow("毛利",         a=> a.c.gross, a=> a.pC ? a.pG : null, 0, 1);
+  pushRow("毛利率",       a=> a.c.margin, a=> a.pI && a.pC ? a.pG / a.pI : null, 1, 1);
   pushRow("销项税",       a=>a.c.output, a=>a.pO);
   pushRow("进项税",       a=> has(a.m.inputTax) ? num(a.m.inputTax) : null, a=>a.pN);
-  pushRow("增值税(应纳)", a=>a.c.base,  a=>a.pV);
-  S.rows.filter(r=>r.kind === "vatRate").forEach(r=>{
+  pushRow("增值税(应纳)", a=>a.c.base,  a=>a.pV, 0, 1);
+  rateRows.forEach(r=>{
     pushRow(r.name, a=>a.c.vals[r.id], a=>a.pRate[r.id]);
   });
-  if(S.rows.some(r=>r.kind === "input")) pushRow("其他税费", a=>a.c.other, a=>a.pX);
-  pushRow("全部税金",     a=>a.c.total, a=>a.pT);
-  pushRow("本月增值税税负率", a=> a.c.income ? a.c.base  / a.c.income : null, ()=>null, 1);
-  pushRow("本年增值税税负率", a=> a.pI ? a.pV / a.pI : null, a=> a.pI ? a.pV / a.pI : null, 1);
-  pushRow("本月综合税负率",   a=> a.c.income ? a.c.total / a.c.income : null, ()=>null, 1);
-  pushRow("本年综合税负率",   a=> a.pI ? a.pT / a.pI : null, a=> a.pI ? a.pT / a.pI : null, 1);
+  if(feeRows.length) pushRow("其他税费", a=>a.c.other, a=>a.pX);
+  pushRow("全部税金",     a=>a.c.total, a=>a.pT, 0, 1);
+  pushRow("本月增值税税负率", a=> a.c.income ? a.c.base  / a.c.income : null, ()=>null, 1, 1);
+  pushRow("本年增值税税负率", a=> a.pI ? a.pV / a.pI : null, a=> a.pI ? a.pV / a.pI : null, 1, 1);
+  pushRow("本月综合税负率",   a=> a.c.income ? a.c.total / a.c.income : null, ()=>null, 1, 1);
+  pushRow("本年综合税负率",   a=> a.pI ? a.pT / a.pI : null, a=> a.pI ? a.pT / a.pI : null, 1, 1);
 
   const enc = new TextEncoder();
   const files = [
@@ -1205,8 +1287,8 @@ function exportExcel(){
       '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>' +
       '</Relationships>')},
     {name:"xl/styles.xml", data:enc.encode(STYLES_XML)},
-    {name:"xl/worksheets/sheet1.xml", data:enc.encode(sheetXml(rows))},
-    {name:"xl/worksheets/sheet2.xml", data:enc.encode(sheetXml(rows2))}
+    {name:"xl/worksheets/sheet1.xml", data:enc.encode(sheetXml(rows, merges, 1))},
+    {name:"xl/worksheets/sheet2.xml", data:enc.encode(sheetXml(rows2, merges2, 1))}
   ];
   download(zipStore(files), "税金台账_" + S.year + ".xlsx");
   toast("已导出 xlsx（含明细台账 + 税负率两个工作表）");
