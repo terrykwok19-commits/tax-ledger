@@ -162,6 +162,7 @@ td.cum.neg{color:var(--red);}
 :root[data-theme="dark"] .detail .tag{color:#e5b25a;}
 .detail p{margin:0 0 6px;}
 .detail .muted{color:var(--muted);}
+.muted{color:var(--muted);}
 .toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);background:var(--card);
   border:1px solid var(--line-strong);border-radius:10px;padding:10px 18px;box-shadow:var(--shadow);
   font-size:12.5px;opacity:0;pointer-events:none;transition:opacity .2s;z-index:99;}
@@ -237,6 +238,9 @@ const DEF_ROWS = [
 ];
 const FIXED = {
   income:  {id:"income",   kind:"sumIncome", name:"收入合计"},
+  cost:    {id:"cost",     kind:"cost",      name:"主营业务成本"},
+  gross:   {id:"gross",    kind:"gross",     name:"毛利"},
+  margin:  {id:"margin",   kind:"margin",    name:"毛利率"},
   output:  {id:"output",   kind:"output",    name:"销项税"},
   inputTax:{id:"inputTax", kind:"inputTax",  name:"进项税"},
   vat:     {id:"vat",      kind:"vat",       name:"增值税"},
@@ -244,8 +248,9 @@ const FIXED = {
 };
 const KINDS = ["income","vatRate","input"];
 const OV = id => id + "Override";
-const isEdit = r => r.kind === "income" || r.kind === "input" || r.kind === "inputTax";
+const isEdit = r => r.kind === "income" || r.kind === "input" || r.kind === "inputTax" || r.kind === "cost";
 const isHyb  = r => r.kind === "output" || r.kind === "vatRate";
+const isPctRow = r => !!r && r.kind === "margin";
 
 const blank = () => ({});
 const defaults = () => ({
@@ -269,7 +274,8 @@ const newRowId = () => {
 function defOrder(){
   const out = [];
   S.rows.filter(r=>r.kind === "income").forEach(r=>out.push(r.id));
-  out.push(FIXED.income.id, FIXED.output.id, FIXED.inputTax.id, FIXED.vat.id);
+  out.push(FIXED.income.id, FIXED.cost.id, FIXED.gross.id, FIXED.margin.id);
+  out.push(FIXED.output.id, FIXED.inputTax.id, FIXED.vat.id);
   S.rows.filter(r=>r.kind === "vatRate").forEach(r=>out.push(r.id));
   S.rows.filter(r=>r.kind === "input").forEach(r=>out.push(r.id));
   out.push(FIXED.total.id);
@@ -281,19 +287,6 @@ function rowMap(){
   Object.keys(FIXED).forEach(k=>{ m[FIXED[k].id] = FIXED[k]; });
   return m;
 }
-/* 把一行插到「同类行的最后面」；没有同类行就落在收入合计前 / 税金合计前 */
-function placeInGroup(out, map, r){
-  let at = -1;
-  for(let i=out.length-1;i>=0;i--){
-    const x = map[out[i]];
-    if(x && x.kind === r.kind){ at = i + 1; break; }
-  }
-  if(at < 0){
-    const a = out.indexOf(r.kind === "income" ? FIXED.income.id : FIXED.total.id);
-    at = a < 0 ? out.length : a;
-  }
-  out.splice(at, 0, r.id);
-}
 function order(){
   const map = rowMap();
   if(!Array.isArray(S.order) || !S.order.length) return defOrder();
@@ -301,10 +294,19 @@ function order(){
   S.order.forEach(id=>{
     if(map[id] && !seen[id]){ seen[id] = 1; out.push(id); }
   });
-  /* 固定行缺失（异常存档）就退回默认顺序，别把计算行弄丢 */
-  if(Object.keys(FIXED).some(k=>!seen[FIXED[k].id])) return defOrder();
-  /* 新增/导入进来、还没落位的行，按同类末位插入 */
-  S.rows.forEach(r=>{ if(!seen[r.id]){ placeInGroup(out, map, r); seen[r.id] = 1; } });
+  /* 存档里没有的行（新增的固定行、导入进来的行）按默认顺序插到前后邻行之间，
+     不覆盖用户已经拖出来的顺序 */
+  const def = defOrder();
+  def.forEach((id, i)=>{
+    if(seen[id]) return;
+    let at = -1;
+    for(let j=i-1;j>=0;j--){
+      const p = out.indexOf(def[j]);
+      if(p >= 0){ at = p + 1; break; }
+    }
+    out.splice(at < 0 ? 0 : at, 0, id);
+    seen[id] = 1;
+  });
   return out;
 }
 const rowsOf = () => { const map = rowMap(); return order().map(id=>map[id]); };
@@ -430,15 +432,25 @@ function calcMonth(m){
 
   /* 4. 税金合计 = 增值税 + 所有附加税费 + 所有手工税费（按当前存在的行） */
   const total = r2(base + vatFee + otherFee);
+
+  /* 5. 毛利 = 收入合计 − 主营业务成本；毛利率 = 毛利 ÷ 收入合计
+        成本没填（也没填 0）时毛利与毛利率都留空，避免一填收入就显示 100% */
+  const costFilled = has(m.cost);
+  const cost = r2(num(m.cost));
+  const gross = costFilled ? r2(income - cost) : null;
+  const margin = (costFilled && income) ? (gross / income) : null;
+
   vals.income = income; vals.output = output; vals.inputTax = inputTax;
   vals.vat = vat; vals.total = total;
+  vals.cost = cost; vals.gross = gross; vals.margin = margin;
   auto.output = autoOutput; manual.output = manOutput;
 
   return { income, output, inputTax, vat, base, total, vals, auto, manual,
-           vatFee, other: otherFee };
+           vatFee, other: otherFee, cost, gross, margin, costFilled };
 }
 function isBlank(m){
   if(has(m.inputTax)) return false;
+  if(has(m.cost)) return false;
   return S.rows.every(r=> r.kind === "vatRate" ? !has(m[OV(r.id)]) : !has(m[r.id]));
 }
 
@@ -467,8 +479,11 @@ function rateTag(r){
     return '<i class="rt" data-rt="'+r.id+'"'+(r.kind === "vatRate" && r.half ? ' data-half="1"' : '')+
            ' title="点击修改'+(r.kind === "income" ? "销项税率" : "费率")+'"></i>';
   if(r.kind === "inputTax") return '<i>手工</i>';
+  if(r.kind === "cost")     return '<i>手工</i>';
   if(r.kind === "output")   return '<i>可手改</i>';
   if(r.kind === "vat")      return '<i>销项−进项</i>';
+  if(r.kind === "gross")    return '<i>收入−成本</i>';
+  if(r.kind === "margin")   return '<i>毛利÷收入</i>';
   return '';
 }
 
@@ -734,7 +749,13 @@ function setVal(el, v){
 }
 function setCalc(td, v, kind, blankMonth){
   if(!td) return;
-  if(blankMonth){ td.textContent=""; td.classList.remove("neg","zero"); td.title=""; return; }
+  td.classList.remove("neg","zero");
+  if(blankMonth || v === null || v === undefined){ td.textContent=""; td.title=""; return; }
+  if(kind === "pct"){                       // 毛利率：存小数，显示百分比
+    td.textContent = (v * 100).toFixed(2) + "%";
+    td.title = "毛利率 = 毛利 ÷ 收入合计";
+    return;
+  }
   td.textContent = fmt(v);
   td.classList.toggle("neg", v < -0.004);
   td.classList.toggle("zero", Math.abs(v) < 0.005);
@@ -745,10 +766,11 @@ function setCalc(td, v, kind, blankMonth){
 function rangeSum(a, b){
   const rows = rowsOf(), o = {}, seen = {};
   rows.forEach(r=>{ o[r.id] = 0; seen[r.id] = false; });
-  let any = false;
+  let any = false, anyCost = false;
   for(let i=a;i<=b;i++){
     const m = S.months[i], c = calcMonth(m);
     if(!isBlank(m)) any = true;
+    if(has(m.cost)) anyCost = true;
     rows.forEach(r=>{
       if(isEdit(r)){
         o[r.id] += num(m[r.id]);
@@ -759,6 +781,9 @@ function rangeSum(a, b){
     });
   }
   rows.forEach(r=>{ o[r.id] = r2(o[r.id]); });
+  /* 毛利/毛利率不是可加量：毛利率用「累计毛利 ÷ 累计收入」，没有成本数据时留空 */
+  if(anyCost) o.margin = o.income ? o.gross / o.income : null;
+  else { o.gross = null; o.margin = null; }
   return {v:o, seen, any};
 }
 
@@ -773,10 +798,17 @@ function paint(){
       rows.forEach(r=>{
         const td = cumCells[r.id];
         if(!td) return;
-        const dim = !any || (isEdit(r) && !seen[r.id]);
-        if(dim){ td.textContent = ""; td.classList.remove("neg"); return; }
-        td.textContent = fmt(cv[r.id]);
-        td.classList.toggle("neg", cv[r.id] < -0.004);
+        const val = cv[r.id];
+        const dim = !any || (isEdit(r) && !seen[r.id]) || val === null || val === undefined;
+        if(dim){ td.textContent = ""; td.classList.remove("neg"); td.title = ""; return; }
+        if(isPctRow(r)){
+          td.textContent = (val * 100).toFixed(2) + "%";
+          td.classList.toggle("neg", val < 0);
+          td.title = (v.a+1) + "–" + (v.b+1) + " 月毛利率";
+          return;
+        }
+        td.textContent = fmt(val);
+        td.classList.toggle("neg", val < -0.004);
         td.title = (v.a+1) + "–" + (v.b+1) + " 月累计";
       });
       return;
@@ -784,8 +816,8 @@ function paint(){
     const i = v.i, m = S.months[i], c = cols[i];
     const blankMonth = isBlank(m);
 
-    /* 纯输入行（收入项 / 手工税费 / 进项税） */
-    rows.filter(r=> r.kind === "income" || r.kind === "input" || r.kind === "inputTax").forEach(r=>{
+    /* 纯输入行（收入项 / 手工税费 / 进项税 / 主营业务成本） */
+    rows.filter(r=> r.kind === "income" || r.kind === "input" || r.kind === "inputTax" || r.kind === "cost").forEach(r=>{
       setVal(inputs[r.id + "_" + i], m[r.id]);
     });
 
@@ -808,12 +840,19 @@ function paint(){
 
     /* 只读计算行 */
     rows.filter(r=> !isEdit(r) && !isHyb(r)).forEach(r=>{
-      setCalc(calcCells[r.id + "_" + i], c.vals[r.id], r.kind === "vat" ? "vat" : null, blankMonth);
+      setCalc(calcCells[r.id + "_" + i], c.vals[r.id],
+              r.kind === "vat" ? "vat" : (isPctRow(r) ? "pct" : null), blankMonth);
     });
   });
 
+  const anyCost = S.months.some(m=>has(m.cost));
+  const sumIn = r2(cols.reduce((a,c)=>a + (c.income || 0), 0));
+  const sumGr = r2(cols.reduce((a,c)=>a + (c.gross || 0), 0));
+
   const T = {};
   rows.forEach(r=>{
+    if(r.kind === "gross"){ T[r.id] = anyCost ? sumGr : null; return; }
+    if(r.kind === "margin"){ T[r.id] = (anyCost && sumIn) ? sumGr / sumIn : null; return; }
     T[r.id] = isEdit(r)
       ? r2(S.months.reduce((a,m)=>a + num(m[r.id]), 0))
       : r2(cols.reduce((a,c)=>a + (c.vals[r.id] || 0), 0));
@@ -821,6 +860,16 @@ function paint(){
   Object.keys(T).forEach(k=>{
     const td = totalCells[k];
     if(!td) return;
+    const rr = rows.find(x=>x.id === k);
+    if(T[k] === null || T[k] === undefined){
+      td.textContent = ""; td.classList.remove("neg","zero"); td.title = ""; return;
+    }
+    if(isPctRow(rr)){
+      td.textContent = (T[k] * 100).toFixed(2) + "%";
+      td.classList.toggle("neg", T[k] < 0);
+      td.title = "全年毛利率 = 全年毛利 ÷ 全年收入 = " + fmt(sumGr) + " ÷ " + fmt(sumIn);
+      return;
+    }
     td.textContent = fmt(T[k]);
     td.classList.toggle("neg", T[k] < -0.004);
   });
@@ -832,14 +881,19 @@ function paint(){
 /* ---------- 面板 ---------- */
 function paintPanel(){
   const cur = calcMonth(S.months[sel]);
-  let ci=0, cv=0, ct=0;
+  let ci=0, cv=0, ct=0, cg=0, cc=0;
   for(let i=0;i<=sel;i++){
     const c = calcMonth(S.months[i]);
-    ci += c.income; cv += c.base; ct += c.total;
+    ci += c.income; cv += c.base; ct += c.total; cg += (c.gross || 0);
+    cc += (c.costFilled ? c.cost : 0);
   }
+  const ytdPct = ci ? pct(cg, ci) : null;
   $("cardCur").innerHTML =
     '<div class="card-h">本月 · ' + (sel+1) + '月<span>' + S.year + ' 年</span></div>' +
     row("收入合计", fmt(cur.income)) +
+    row("主营业务成本", cur.costFilled ? fmt(cur.cost) : '<span class="muted">未填</span>') +
+    row("毛利", cur.gross === null ? '<span class="muted">—</span>' : fmt(cur.gross)) +
+    row("毛利率", pctTxt(pct(cur.gross, cur.income)), "big") +
     row("增值税（应纳）", fmt(cur.base)) +
     row("税金合计", fmt(cur.total)) +
     row("本月增值税税负率", pctTxt(pct(cur.base, cur.income)), "big") +
@@ -848,6 +902,9 @@ function paintPanel(){
   $("cardYtd").innerHTML =
     '<div class="card-h">本年累计 · 1–' + (sel+1) + '月<span>截至选中月</span></div>' +
     row("累计收入", fmt(r2(ci))) +
+    row("累计主营业务成本", fmt(r2(cc))) +
+    row("累计毛利", fmt(r2(cg))) +
+    row("累计毛利率", pctTxt(ytdPct), "big") +
     row("累计增值税", fmt(r2(cv))) +
     row("累计税金合计", fmt(r2(ct))) +
     row("本年增值税税负率", pctTxt(pct(cv, ci)), "big") +
@@ -885,6 +942,9 @@ function paintPanel(){
   $("detail").innerHTML =
     '<p><b>收入合计 ' + fmt(cur.income) + '</b> ＝ ' +
       (incomes.length ? incomes.map(r=>r.name + ' ' + fmt(num(m[r.id]))).join(" ＋ ") : '<span class="muted">（无）</span>') + '</p>' +
+    '<p><b>毛利 ' + (cur.gross === null ? '<span class="muted">未填成本</span>' : fmt(cur.gross)) + '</b> ＝ 收入合计 ' +
+      fmt(cur.income) + ' － 主营业务成本 ' + (cur.costFilled ? fmt(cur.cost) : '<span class="muted">未填</span>') +
+      (cur.margin === null ? '' : '　<span class="muted">毛利率 ' + pctTxt(pct(cur.gross, cur.income)) + '</span>') + '</p>' +
     '<p><b>销项税 ' + fmt(cur.output) + '</b> ＝ ' + outLine + manTags + '</p>' +
     '<p><b>增值税 ' + fmt(cur.vat) + '</b> ＝ 销项税 ' + fmt(cur.output) + ' － 进项税 ' + fmt(num(m.inputTax)) +
       (cur.vat < 0 ? '　<span class="muted">（留抵，附加税基数取 0）</span>' : '') + '</p>' +
@@ -1037,16 +1097,26 @@ function exportExcel(){
 
   rowsOf().forEach(r=>{
     const line = [{t:"s", v:r.name, s:STY.text}];
-    let sum = 0, anyV = false;
+    const pctRow = isPctRow(r);
+    let sum = 0, anyV = false, sumG = 0, sumI = 0;
     for(let i=0;i<N;i++){
       const m = S.months[i], c = calcMonth(m);
       if(isBlank(m)){ line.push(null); continue; }
       if(isEdit(r) && !has(m[r.id])){ line.push(null); continue; }
-      const v = isEdit(r) ? num(m[r.id]) : (c.vals[r.id] || 0);
+      if(pctRow){
+        const mv = c.vals.margin;
+        if(mv === null || mv === undefined){ line.push(null); }
+        else { line.push({t:"n", v:mv, s:STY.pct}); }
+        if(c.costFilled){ sumG += c.gross; sumI += c.income; anyV = true; }
+        continue;
+      }
+      const v = isEdit(r) ? num(m[r.id]) : c.vals[r.id];
+      if(v === null || v === undefined){ line.push(null); continue; }
       sum += v; anyV = true;
       line.push({t:"n", v:r2(v), s:STY.num});
     }
-    line.push(anyV ? {t:"n", v:r2(sum), s:STY.num} : null);
+    if(pctRow) line.push(anyV && sumI ? {t:"n", v:sumG / sumI, s:STY.pct} : null);
+    else       line.push(anyV ? {t:"n", v:r2(sum), s:STY.num} : null);
     rows.push(line);
   });
 
@@ -1059,7 +1129,7 @@ function exportExcel(){
   const incRows = rowsOf().filter(r=>r.kind === "income");
   const rateRows = rowsOf().filter(r=>r.kind === "vatRate");
   const acc = [];
-  let pI=0, pO=0, pN=0, pV=0, pT=0, pX=0;
+  let pI=0, pO=0, pN=0, pV=0, pT=0, pX=0, pC=0, pG=0;
   const pInc = {}, pRate = {};
   incRows.forEach(r=>{ pInc[r.id] = 0; });
   rateRows.forEach(r=>{ pRate[r.id] = 0; });
@@ -1068,7 +1138,8 @@ function exportExcel(){
     incRows.forEach(r=>{ pInc[r.id] += num(m[r.id]); });
     rateRows.forEach(r=>{ pRate[r.id] += (c.vals[r.id] || 0); });
     pI += c.income; pO += c.output; pN += num(m.inputTax); pV += c.base; pT += c.total; pX += c.other;
-    acc.push({m, c, blank:isBlank(m), pI, pO, pN, pV, pT, pX,
+    pC += c.cost; pG += (c.gross || 0);
+    acc.push({m, c, blank:isBlank(m), pI, pO, pN, pV, pT, pX, pC, pG,
               pInc:Object.assign({}, pInc), pRate:Object.assign({}, pRate)});
   }
   const last = acc[N-1];
@@ -1091,6 +1162,9 @@ function exportExcel(){
     pushRow(r.name, a=> has(a.m[r.id]) ? num(a.m[r.id]) : null, a=>a.pInc[r.id]);
   });
   pushRow("收入合计",     a=>a.c.income, a=>a.pI);
+  pushRow("主营业务成本", a=> a.c.costFilled ? a.c.cost : null, a=> a.pC ? a.pC : null);
+  pushRow("毛利",         a=> a.c.gross, a=> a.pC ? a.pG : null);
+  pushRow("毛利率",       a=> a.c.margin, a=> a.pI && a.pC ? a.pG / a.pI : null, 1);
   pushRow("销项税",       a=>a.c.output, a=>a.pO);
   pushRow("进项税",       a=> has(a.m.inputTax) ? num(a.m.inputTax) : null, a=>a.pN);
   pushRow("增值税(应纳)", a=>a.c.base,  a=>a.pV);
@@ -1226,12 +1300,14 @@ const LABELS = {
   "未开票收入":"unbilled", "未开票货物收入":"unbilled", "货物未开票收入":"unbilled",
   "服务收入":"service", "销项税":"output", "进项税":"inputTax",
   "城市维护建设税":"city", "城建税":"city", "教育费附加":"edu", "地方教育附加":"localEdu",
-  "地方教育费附加":"localEdu", "印花税":"stamp", "企业所得税":"incomeTax"
+  "地方教育费附加":"localEdu", "印花税":"stamp", "企业所得税":"incomeTax",
+  "主营业务成本":"cost", "营业成本":"cost", "销售成本":"cost",
 };
 /* 这些行是计算结果或标题，导入时不能当成自定义税种 */
 const SKIP_LABELS = new Set([
   "项目","月份","合计","全年合计","总额",
   "收入合计","营业收入合计","税金合计","全部税金","累计税金",
+  "毛利","毛利率","收入","营业收入",
   "增值税","增值税应纳","应纳增值税","增值税计税基数","其他税种","其他税金",
   "本月增值税税负率","本年增值税税负率","本月综合税负率","本年综合税负率","税负率"
 ]);
@@ -1272,7 +1348,7 @@ function applyMatrix(matrix){
   const map = {}, created = [];
   Object.keys(picked).forEach(label=>{
     const f = LABELS[label];
-    if(f === "output" || f === "inputTax"){ map[label] = f; return; }
+    if(f === "output" || f === "inputTax" || f === "cost"){ map[label] = f; return; }
     let row = S.rows.find(x=>x.name === label) || (f ? S.rows.find(x=>x.id === f) : null);
     if(!row){
       const d = DEF_ROWS.find(x=>x.name === label) || (f ? DEF_ROWS.find(x=>x.id === f) : null);
@@ -1323,7 +1399,8 @@ function applyMatrix(matrix){
   /* 全 0 且无手改值的月份还原成空白月（旧表把空月写成 0.00） */
   for(let i=0;i<N;i++){
     const m = fresh[i];
-    const allZero = (!has(m.inputTax) || num(m.inputTax) === 0) && S.rows.every(r=>{
+    const allZero = (!has(m.inputTax) || num(m.inputTax) === 0)
+      && (!has(m.cost) || num(m.cost) === 0) && S.rows.every(r=>{
       if(r.kind === "vatRate") return !has(m[OV(r.id)]);
       if(r.kind === "income" || r.kind === "input") return !has(m[r.id]) || num(m[r.id]) === 0;
       return true;
