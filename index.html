@@ -231,7 +231,10 @@ const N = 12;
      vatRate 增值税附加 —— 按「增值税×费率」算（城建/教育/地方教育…），可减半
      input   手工税费   —— 直接填金额（印花税/企业所得税/房产税/土地使用税…）
    固定行（收入合计、销项税、进项税、预缴房产增值税、增值税、预缴房产城建税、税金合计）由 FIXED 提供，不可删、不可改名。
-   预缴房产增值税只抵减应纳增值税，预缴房产城建税只抵减城建税那一行，两者都不进税金合计。
+   计税依据：增值税 = 销项 − 进项 − 预缴房产增值税；
+             城建税 / 教育费附加 / 地方教育附加 = 增值税 × 各自费率；
+             预缴房产城建税 = 预缴房产增值税 × 城建税率。
+   城建税与预缴房产城建税各算各的、互不抵减；预缴房产增值税抵减增值税后不进合计，预缴房产城建税独立计入合计。
    合计口径永远是「当前存在的行相加」，删掉一行自动从合计里消失。
    ========================================== */
 const DEF_ROWS = [
@@ -259,11 +262,12 @@ const FIXED = {
 const KINDS = ["income","vatRate","input"];
 const OV = id => id + "Override";
 const isEdit = r => r.kind === "income" || r.kind === "input" || r.kind === "inputTax" ||
-                    r.kind === "cost" || r.kind === "preVat" || r.kind === "preCity";
-const isHyb  = r => r.kind === "output" || r.kind === "vatRate";
+                    r.kind === "cost" || r.kind === "preVat";
+/* 双态行：既能自动算、也能手改（销项税、附加税费、预缴房产城建税） */
+const isHyb  = r => r.kind === "output" || r.kind === "vatRate" || r.kind === "preCity";
 const isPctRow = r => !!r && r.kind === "margin";
-/* 城建税行：预缴房产城建税只抵减这一种税，不抵教育费附加。
-   不限定 kind —— 老的/导入的表里城建税可能是手工税费行，同样要抵减 */
+/* 城建税行：附加税费里税率最高的那一档，也是预缴房产城建税的税率来源。
+   不限定 kind —— 老的/导入的表里城建税可能是手工税费行 */
 const isCityRow = r => !!r && r.kind !== "income" && r.kind !== "preCity" &&
   (r.id === "city" || /城市维护建设税|城建税/.test(r.name));
 
@@ -433,7 +437,7 @@ function foldPrepaidRows(){
       moved = true; return;
     }
     if(hitCity(n)){
-      S.months.forEach(m=>{ if(has(m[r.id])) m.preCity = r2(num(m.preCity) + num(m[r.id])); });
+      S.months.forEach(m=>{ if(has(m[r.id])) m[OV("preCity")] = r2(num(m[OV("preCity")]) + num(m[r.id])); });
       moved = true; return;
     }
     keep.push(r);
@@ -448,6 +452,14 @@ function foldPrepaidRows(){
   return moved;
 }
 /* ---------- 计算引擎 ---------- */
+/* 城建税率（含减半）：预缴房产城建税按同一个税率对「预缴房产增值税」计征 */
+function cityRateInfo(){
+  const r = S.rows.find(isCityRow);
+  const k = S.halve ? 0.5 : 1;
+  const rate = r ? num(r.rate) : 7;
+  const half = r ? (r.half ? k : 1) : k;
+  return { rate, half, pct: rate * half };
+}
 function calcMonth(m){
   /* 1. 收入合计 = 当前所有收入项之和；销项税 = 各收入项 × 各自税率之和 */
   let income = 0, autoOutput = 0;
@@ -465,45 +477,36 @@ function calcMonth(m){
   const output = manOutput ? r2(num(m[OV("output")])) : autoOutput;
   const inputTax = num(m.inputTax);
   const preVat = num(m.preVat);          // 异地房产已预缴的增值税，申报时抵减
-  const preCity = num(m.preCity);        // 异地房产已预缴的城建税，只抵减城建税
   const vat = r2(output - inputTax - preVat);
   const base = Math.max(vat, 0);              // 附加税基数：留抵时取 0
   const k = S.halve ? 0.5 : 1;
 
-  /* 3. 附加税费 = 增值税基数 × 费率（可减半、可手改）；城建税再减预缴；手工税费直接取数 */
+  /* 3. 预缴房产城建税：以「预缴房产增值税」为计税依据，与城建税互不影响 */
+  const cityInfo = cityRateInfo();                            // 城建税率（含减半）
+  const autoPreCity = r2(preVat * cityInfo.pct / 100);
+  const manPreCity = has(m[OV("preCity")]);
+  const preCity = manPreCity ? r2(num(m[OV("preCity")])) : autoPreCity;
+
+  /* 4. 附加税费 = 增值税基数 × 费率（可减半、可手改）；手工税费直接取数 */
   const vals = {}, auto = {}, autoRaw = {}, manual = {};
   let vatFee = 0, otherFee = 0;
   S.rows.forEach(r=>{
     if(r.kind === "income"){ vals[r.id] = r2(num(m[r.id])); return; }
     if(r.kind === "vatRate"){
-      const raw = r2(base * num(r.rate) / 100 * (r.half ? k : 1));
-      autoRaw[r.id] = raw;                       // 未减预缴的毛额，导入时用来判断是否手改
-      const city = isCityRow(r);
-      const a = city ? r2(raw - preCity) : raw;  // 城建税 = 基数×费率 − 已预缴
+      const a = r2(base * num(r.rate) / 100 * (r.half ? k : 1));
+      autoRaw[r.id] = a;
       auto[r.id] = a;
       manual[r.id] = has(m[OV(r.id)]);
-      if(manual[r.id]){
-        const mv = r2(num(m[OV(r.id)]));
-        /* 手改值正好是「未减预缴的毛额」→ 当毛额，照样减预缴；
-           其它手改值视为用户填的净额最终数，原样采用 */
-        vals[r.id] = (city && preCity && Math.abs(mv - raw) <= 0.005) ? r2(mv - preCity) : mv;
-      }else{
-        vals[r.id] = a;
-      }
+      vals[r.id] = manual[r.id] ? r2(num(m[OV(r.id)])) : a;
       vatFee += vals[r.id];
       return;
     }
-    if(r.kind === "input"){
-      let v = num(m[r.id]);
-      /* 城建税被建成手工税费行时（老台账 / 导入），同样抵减预缴；没填城建税就不减，免得变负数 */
-      if(isCityRow(r) && preCity && has(m[r.id])) v = r2(v - preCity);
-      vals[r.id] = v; otherFee += v;
-    }
+    if(r.kind === "input"){ vals[r.id] = num(m[r.id]); otherFee += vals[r.id]; }
   });
   vatFee = r2(vatFee); otherFee = r2(otherFee);
 
-  /* 4. 税金合计 = 增值税 + 所有附加税费（城建税已净额）+ 所有手工税费 */
-  const total = r2(base + vatFee + otherFee);
+  /* 5. 税金合计 = 增值税 + 附加税费 + 手工税费 + 预缴房产城建税（已缴，独立计列） */
+  const total = r2(base + vatFee + otherFee + preCity);
 
   /* 5. 毛利 = 收入合计 − 主营业务成本；毛利率 = 毛利 ÷ 收入合计
         成本没填（也没填 0）时毛利与毛利率都留空，避免一填收入就显示 100% */
@@ -517,27 +520,34 @@ function calcMonth(m){
   vals.vat = vat; vals.total = total;
   vals.cost = cost; vals.gross = gross; vals.margin = margin;
   auto.output = autoOutput; manual.output = manOutput;
+  auto.preCity = autoPreCity; manual.preCity = manPreCity;
 
-  return { income, output, inputTax, preVat, preCity, vat, base, total, vals, auto, autoRaw, manual,
+  return { income, output, inputTax, preVat, preCity, preCityAuto:autoPreCity,
+           vat, base, total, vals, auto, autoRaw, manual,
            vatFee, other: otherFee, cost, gross, margin, costFilled };
 }
-/* 城建税格如果手填的正好是「未减预缴的毛额」，说明填的是毛额口径：
-   直接回归自动值（毛额 − 预缴），免得输入框显示 210 而合计按 160 算 */
-function normalizeCityOverride(m){
-  const pre = num(m.preCity);
-  if(!pre) return;
-  const c = calcMonth(m);
-  S.rows.forEach(r=>{
-    if(r.kind !== "vatRate" || !isCityRow(r)) return;
-    if(!has(m[OV(r.id)])) return;
-    const raw = c.autoRaw[r.id];
-    if(raw !== undefined && Math.abs(num(m[OV(r.id)]) - raw) <= 0.005) delete m[OV(r.id)];
+/* 老存档里「预缴房产城建税」是手填值存在 m.preCity，现在改成双态行（自动 = 预缴增值税×税率），
+   把老值搬到 override 位置，保持显示不变 */
+function migratePreCity(){
+  let moved = false;
+  S.months.forEach(m=>{
+    if(!has(m.preCity)) return;
+    if(!has(m[OV("preCity")])) m[OV("preCity")] = m.preCity;
+    delete m.preCity;
+    moved = true;
   });
+  return moved;
+}
+/* 预缴房产城建税如果手填的正好等于自动值，就当没手改，回归自动 */
+function normalizePreCity(m){
+  if(!has(m[OV("preCity")])) return;
+  const c = calcMonth(m);
+  if(Math.abs(num(m[OV("preCity")]) - c.preCityAuto) <= 0.005) delete m[OV("preCity")];
 }
 function isBlank(m){
   if(has(m.inputTax)) return false;
   if(has(m.cost)) return false;
-  if(has(m.preVat) || has(m.preCity)) return false;
+  if(has(m.preVat) || has(m[OV("preCity")])) return false;
   return S.rows.every(r=> r.kind === "vatRate" ? !has(m[OV(r.id)]) : !has(m[r.id]));
 }
 
@@ -566,10 +576,10 @@ function rateTag(r){
     return '<i class="rt" data-rt="'+r.id+'"'+(r.kind === "vatRate" && r.half ? ' data-half="1"' : '')+
            ' title="点击修改'+(r.kind === "income" ? "销项税率" : "费率")+'"></i>';
   if(r.kind === "inputTax") return '<i>手工</i>';
-  if(r.kind === "input" && isCityRow(r)) return '<i>手工 · 已减预缴</i>';
+  if(r.kind === "input" && isCityRow(r)) return '<i>手工</i>';
   if(r.kind === "cost")     return '<i>手工</i>';
   if(r.kind === "preVat")   return '<i>手工 · 抵减增值税</i>';
-  if(r.kind === "preCity")  return '<i>手工 · 抵减城建税</i>';
+  if(r.kind === "preCity")  return '<i>预缴增值税×税率</i>';
   if(r.kind === "output")   return '<i>可手改</i>';
   if(r.kind === "vat")      return '<i>销项−进项−预缴</i>';
   if(r.kind === "gross")    return '<i>收入−成本</i>';
@@ -820,7 +830,7 @@ function delRow(id){
 function onInput(f, i, kind, el){
   const raw = el.value.replace(/,/g,"").replace(/[^\d.\-]/g,"");
   if(raw !== el.value) el.value = raw;
-  if(kind === "output" || kind === "vatRate") S.months[i][OV(f)] = (raw === "" ? null : raw);
+  if(kind === "output" || kind === "vatRate" || kind === "preCity") S.months[i][OV(f)] = (raw === "" ? null : raw);
   else S.months[i][f] = raw;
   paint(); save();
 }
@@ -865,13 +875,11 @@ function rangeSum(a, b){
     if(!isBlank(m)) any = true;
     if(has(m.cost)) anyCost = true;
     rows.forEach(r=>{
-      /* 城建税手工行取「已减预缴」的净额，与月度一致；其余输入行直接累加手填值 */
-      if(isEdit(r) && !isCityRow(r)){
+      if(isEdit(r)){
         o[r.id] += num(m[r.id]);
         if(has(m[r.id])) seen[r.id] = true;
       }else{
         o[r.id] += (c.vals[r.id] || 0);
-        if(isEdit(r) && has(m[r.id])) seen[r.id] = true;
       }
     });
   }
@@ -885,7 +893,7 @@ function rangeSum(a, b){
 function paint(){
   const cols = [];
   for(let i=0;i<N;i++){
-    normalizeCityOverride(S.months[i]);
+    normalizePreCity(S.months[i]);
     cols.push(calcMonth(S.months[i]));
   }
   const rows = rowsOf();
@@ -914,20 +922,12 @@ function paint(){
     const i = v.i, m = S.months[i], c = cols[i];
     const blankMonth = isBlank(m);
 
-    /* 纯输入行（收入项 / 手工税费 / 进项税 / 主营业务成本 / 预缴） */
-    rows.filter(r=> r.kind === "income" || r.kind === "input" || r.kind === "inputTax" ||
-                   r.kind === "cost" || r.kind === "preVat" || r.kind === "preCity").forEach(r=>{
-      const el = inputs[r.id + "_" + i];
-      setVal(el, m[r.id]);
-      /* 城建税如果被建成手工税费行，提示已减预缴后的净额 */
-      if(el && r.kind === "input" && isCityRow(r)){
-        el.title = c.preCity
-          ? "手填 " + fmt(num(m[r.id])) + " − 预缴房产城建税 " + fmt(c.preCity) + " = " + fmt(c.vals[r.id])
-          : "手工填写的城建税";
-      }
+    /* 纯输入行（收入项 / 手工税费 / 进项税 / 主营业务成本 / 预缴增值税） */
+    rows.filter(r=> isEdit(r)).forEach(r=>{
+      setVal(inputs[r.id + "_" + i], m[r.id]);
     });
 
-    /* 双态行（销项税、附加税费）：自动值 + 可手改 + ↺ 还原 */
+    /* 双态行（销项税、附加税费、预缴房产城建税）：自动值 + 可手改 + ↺ 还原 */
     rows.filter(isHyb).forEach(r=>{
       const el = inputs[r.id + "_" + i];
       if(!el) return;
@@ -939,9 +939,11 @@ function paint(){
         setVal(el, val);
       }
       el.parentElement.classList.toggle("manual", man);
-      el.title = man
-        ? "手动值（自动值应为 " + fmt(c.auto[r.id]) + "），点 ↺ 恢复自动"
-        : "自动计算：" + fmt(c.auto[r.id]) + "，可直接改成手填值";
+      el.title = r.kind === "preCity"
+        ? (man ? "手动值（预缴增值税 " + fmt(c.preVat) + " × " + fmt(cityRateInfo().pct) + "% = " + fmt(c.auto.preCity) + "），点 ↺ 恢复自动"
+               : "自动计算：预缴房产增值税 " + fmt(c.preVat) + " × " + fmt(cityRateInfo().pct) + "%，可直接改成手填值")
+        : (man ? "手动值（自动值应为 " + fmt(c.auto[r.id]) + "），点 ↺ 恢复自动"
+               : "自动计算：" + fmt(c.auto[r.id]) + "，可直接改成手填值");
     });
 
     /* 只读计算行 */
@@ -959,7 +961,7 @@ function paint(){
   rows.forEach(r=>{
     if(r.kind === "gross"){ T[r.id] = anyCost ? sumGr : null; return; }
     if(r.kind === "margin"){ T[r.id] = (anyCost && sumIn) ? sumGr / sumIn : null; return; }
-    T[r.id] = (isEdit(r) && !isCityRow(r))
+    T[r.id] = isEdit(r)
       ? r2(S.months.reduce((a,m)=>a + num(m[r.id]), 0))
       : r2(cols.reduce((a,c)=>a + (c.vals[r.id] || 0), 0));
   });
@@ -1043,9 +1045,7 @@ function paintPanel(){
   const rateLine = rates.length
     ? rates.map(r=>r.name + " " + fmt(cur.vals[r.id])).join(" ＋ ")
     : '<span class="muted">（没有附加税费项目）</span>';
-  const feeLine = fees.filter(r=>num(m[r.id]) !== 0)
-                      .map(r=>r.name + " " + fmt(isCityRow(r) ? cur.vals[r.id] : num(m[r.id]))).join(" ＋ ");
-  const cityMissing = cur.preCity && !ordRows.some(isCityRow);
+  const feeLine = fees.filter(r=>num(m[r.id]) !== 0).map(r=>r.name + " " + fmt(num(m[r.id]))).join(" ＋ ");
 
   $("detail").innerHTML =
     '<p><b>收入合计 ' + fmt(cur.income) + '</b> ＝ ' +
@@ -1057,11 +1057,15 @@ function paintPanel(){
     '<p><b>增值税 ' + fmt(cur.vat) + '</b> ＝ 销项税 ' + fmt(cur.output) + ' － 进项税 ' + fmt(num(m.inputTax)) +
       (cur.preVat ? ' － 预缴房产增值税 ' + fmt(cur.preVat) : '') +
       (cur.vat < 0 ? '　<span class="muted">（留抵，附加税基数取 0）</span>' : '') + '</p>' +
-    '<p>附加税费基数 <b>' + fmt(cur.base) + '</b> × ' + k + '：' + rateLine +
-      (cur.preCity ? '　<span class="muted">（城建税已减预缴房产城建税 ' + fmt(cur.preCity) + '）</span>' : '') +
-      (cityMissing ? '　<span class="tag">当前没有城建税行，预缴房产城建税无处抵减</span>' : '') + '</p>' +
+    '<p>附加税费基数 <b>' + fmt(cur.base) + '</b> × ' + k + '：' + rateLine + '</p>' +
+    (cur.preVat || cur.preCity
+      ? '<p>预缴房产城建税 <b>' + fmt(cur.preCity) + '</b> ＝ 预缴房产增值税 ' + fmt(cur.preVat) +
+        ' × ' + fmt(cityRateInfo().pct) + '%' + (cur.manual.preCity ? '　<span class="tag">手改</span>' : '') +
+        '　<span class="muted">（与上面城建税各算各的，互不抵减）</span></p>'
+      : '') +
     '<p><b>税金合计 ' + fmt(cur.total) + '</b> ＝ 增值税 ' + fmt(cur.base) +
-      ' ＋ 附加税费 ' + fmt(cur.vatFee) + (feeLine ? ' ＋ ' + feeLine : '') + '</p>';
+      ' ＋ 附加税费 ' + fmt(cur.vatFee) + (feeLine ? ' ＋ ' + feeLine : '') +
+      (cur.preCity ? ' ＋ 预缴房产城建税 ' + fmt(cur.preCity) : '') + '</p>';
 }
 function row(label, value, cls){
   return '<dl class="row' + (cls ? " " + cls : "") + '"><dt>' + label + '</dt><dd>' + value + '</dd></dl>';
@@ -1295,14 +1299,7 @@ function exportExcel(){
         return;
       }
       let v = null;
-      if(!a.blank){
-        if(isEdit(r)){
-          /* 城建税手工行按「已减预缴」的净额导出，与页面合计一致 */
-          v = has(m[r.id]) ? (isCityRow(r) ? c.vals[r.id] : num(m[r.id])) : null;
-        }else{
-          v = c.vals[r.id];
-        }
-      }
+      if(!a.blank) v = isEdit(r) ? (has(m[r.id]) ? num(m[r.id]) : null) : c.vals[r.id];
       cells.push(numCell(v, ns));
       if(v !== null && v !== undefined){ sum += v; any = true; }
     });
@@ -1386,11 +1383,11 @@ function exportExcel(){
   rateRows.forEach(r=>{
     pushRow(r.name, a=>a.c.vals[r.id], a=>a.pRate[r.id]);
     if(isCityRow(r)){
-      pushRow("预缴房产城建税", a=> has(a.m.preCity) ? num(a.m.preCity) : null, a=>a.pPc);
+      pushRow("预缴房产城建税", a=> a.c.preCity ? a.c.preCity : null, a=>a.pPc);
       cityDone = true;
     }
   });
-  if(!cityDone) pushRow("预缴房产城建税", a=> has(a.m.preCity) ? num(a.m.preCity) : null, a=>a.pPc);
+  if(!cityDone) pushRow("预缴房产城建税", a=> a.c.preCity ? a.c.preCity : null, a=>a.pPc);
   if(feeRows.length) pushRow("其他税费", a=>a.c.other, a=>a.pX);
   pushRow("全部税金",     a=>a.c.total, a=>a.pT, 0, 1);
   pushRow("本月增值税税负率", a=> a.c.income ? a.c.base  / a.c.income : null, ()=>null, 1, 1);
@@ -1525,7 +1522,7 @@ const LABELS = {
   "城市维护建设税":"city", "城建税":"city", "教育费附加":"edu", "地方教育附加":"localEdu",
   "地方教育费附加":"localEdu", "印花税":"stamp", "企业所得税":"incomeTax",
   "主营业务成本":"cost", "营业成本":"cost", "销售成本":"cost", "主营业务成本合计":"cost",
-  /* 异地房产预缴：只抵减增值税 / 城建税，不进税金合计 */
+  /* 异地房产预缴：预缴增值税抵减应纳增值税；预缴城建税按预缴增值税单算，独立计入合计 */
   "预缴房产增值税":"preVat", "房产增值税":"preVat", "预缴增值税":"preVat", "异地预缴增值税":"preVat",
   "预缴房产城建税":"preCity", "房产城建税":"preCity", "预缴城建税":"preCity", "异地预缴城建税":"preCity",
 };
@@ -1745,7 +1742,7 @@ function applyMatrix(matrix, fileName){
     if(!key) return;
     const vals = picked[label];
     const row = key === "output" ? null : S.rows.find(x=>x.id === key);
-    const dual = key === "output" || (row && row.kind === "vatRate");
+    const dual = key === "output" || key === "preCity" || (row && row.kind === "vatRate");
     for(let i=0;i<N;i++){
       if(vals[i] === undefined) continue;
       if(dual) fresh[i][OV(key)] = String(vals[i]);
@@ -1766,12 +1763,14 @@ function applyMatrix(matrix, fileName){
     const m = fresh[i], c = calcMonth(m);
     S.rows.filter(r=>r.kind === "vatRate").forEach(r=>{
       if(!has(m[OV(r.id)])) return;
-      /* 城建税的自动值已扣预缴；文件里填的往往是「未扣预缴」的毛额，两种都算自动 */
-      const ref = (c.autoRaw[r.id] !== undefined) ? c.autoRaw[r.id] : c.auto[r.id];
-      if(Math.abs(num(m[OV(r.id)]) - ref) <= 0.005 ||
-         Math.abs(num(m[OV(r.id)]) - num(c.auto[r.id])) <= 0.005) delete m[OV(r.id)];
+      if(Math.abs(num(m[OV(r.id)]) - num(c.auto[r.id])) <= 0.005) delete m[OV(r.id)];
       else manCount++;
     });
+    /* 预缴房产城建税：文件填的数与「预缴增值税×城建税率」一致就不算手改 */
+    if(has(m[OV("preCity")])){
+      if(Math.abs(num(m[OV("preCity")]) - c.preCityAuto) <= 0.005) delete m[OV("preCity")];
+      else manCount++;
+    }
   }
 
   /* 全 0 且无手改值的月份还原成空白月（旧表把空月写成 0.00） */
@@ -1780,7 +1779,7 @@ function applyMatrix(matrix, fileName){
     const allZero = (!has(m.inputTax) || num(m.inputTax) === 0)
       && (!has(m.cost) || num(m.cost) === 0)
       && (!has(m.preVat) || num(m.preVat) === 0)
-      && (!has(m.preCity) || num(m.preCity) === 0) && S.rows.every(r=>{
+      && (!has(m[OV("preCity")]) || num(m[OV("preCity")]) === 0) && S.rows.every(r=>{
       if(r.kind === "vatRate") return !has(m[OV(r.id)]);
       if(r.kind === "income" || r.kind === "input") return !has(m[r.id]) || num(m[r.id]) === 0;
       return true;
@@ -1789,6 +1788,7 @@ function applyMatrix(matrix, fileName){
   }
   S.months = fresh;
   foldPrepaidRows();      // 老台账里的预缴手工行并进固定行，避免重复计入合计
+  migratePreCity();       // 老口径的「预缴房产城建税」手填值 → 双态行的手改值
 
   /* 视图跟着文件走：文件写了月份就跳到那个月；没写就跳到最后一个有金额的月 */
   let monthIdx = -1;
@@ -1910,6 +1910,7 @@ $("fileInput").addEventListener("change", e=>{
       });
       delete S.rates; delete S.taxes; delete S.showStamp; delete S.showIncomeTax;
       foldPrepaidRows();
+      migratePreCity();
       buildGrid(); syncControls(); paint(); save();
       toast("存档已载入，共 " + S.rows.length + " 个项目行");
     }catch(err){ alert("存档格式不对：" + err.message); }
@@ -1925,6 +1926,7 @@ $("btnClear").addEventListener("click", ()=>{
 
 /* ---------- 启动 ---------- */
 foldPrepaidRows();      // 老存档里的「预缴房产增值税/城建税」手工行并进固定行
+migratePreCity();       // 老的预缴房产城建税手填值 → 双态行手改值
 for(let i=N-1;i>=0;i--){ if(!isBlank(S.months[i])){ sel = i; break; } }
 buildGrid();
 syncControls();
