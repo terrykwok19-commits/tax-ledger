@@ -505,8 +505,9 @@ function calcMonth(m){
   });
   vatFee = r2(vatFee); otherFee = r2(otherFee);
 
-  /* 5. 税金合计 = 增值税 + 附加税费 + 手工税费 + 预缴房产城建税（已缴，独立计列） */
-  const total = r2(base + vatFee + otherFee + preCity);
+  /* 5. 税金合计 = 应纳增值税 + 预缴房产增值税 + 附加税费 + 手工税费 + 预缴房产城建税
+        预缴房产增值税虽然从应纳增值税里减掉了，但它本身也是本月实际承担的税金，合计里要加回来 */
+  const total = r2(base + preVat + vatFee + otherFee + preCity);
 
   /* 5. 毛利 = 收入合计 − 主营业务成本；毛利率 = 毛利 ÷ 收入合计
         成本没填（也没填 0）时毛利与毛利率都留空，避免一填收入就显示 100% */
@@ -1064,6 +1065,7 @@ function paintPanel(){
         '　<span class="muted">（与上面城建税各算各的，互不抵减）</span></p>'
       : '') +
     '<p><b>税金合计 ' + fmt(cur.total) + '</b> ＝ 增值税 ' + fmt(cur.base) +
+      (cur.preVat ? ' ＋ 预缴房产增值税 ' + fmt(cur.preVat) : '') +
       ' ＋ 附加税费 ' + fmt(cur.vatFee) + (feeLine ? ' ＋ ' + feeLine : '') +
       (cur.preCity ? ' ＋ 预缴房产城建税 ' + fmt(cur.preCity) : '') + '</p>';
 }
