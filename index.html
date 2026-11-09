@@ -1414,6 +1414,15 @@ function guessIncomeRate(name){
   if(/货物|销售|商品|产品/.test(name)) return 13;
   return 0;
 }
+/* 免税类项目：出口免税 / 免税收入 / 不征税收入 —— 是收入，不是税费，销项税按 0 计 */
+const isExempt = name => /免税|不征税|出口/.test(name);
+/* 分节标题（一、基础经营数据 / 二、增值税计算明细…）不是项目行 */
+const SECTION_RE = /^[一二三四五六七八九十]+[、.．]/;
+function sectionOf(text){
+  if(/经营|收入|业务数据/.test(text)) return "income";
+  if(/增值税/.test(text)) return "vat";
+  return "fee";
+}
 function applyMatrix(matrix){
   let headerIdx = -1, monthCols = {};
   for(let i=0;i<Math.min(matrix.length, 12);i++){
@@ -1427,14 +1436,22 @@ function applyMatrix(matrix){
   }
   if(headerIdx < 0) throw new Error("没找到「1月…12月」表头，无法识别格式");
 
-  /* 第一遍：按首列名称收数。名称就是「行的身份」，跟列位置无关 */
-  const picked = {}, rates = {};
+  /* 第一遍：按首列名称收数。名称就是「行的身份」，跟列位置无关。
+     同时记下每一项出现在哪个分节（基础经营数据 / 增值税 / 附加税及其他），
+     空行也收进来 —— 表里有这一项，台账里就该有这一行，方便以后补数。 */
+  const picked = {}, rates = {}, secOf = {};
+  let section = "";
   for(let i=headerIdx+1;i<matrix.length;i++){
     const row = matrix[i] || [];
     const raw = String(row[0]||"").replace(/\s/g,"");
+    if(!raw) continue;
+    if(SECTION_RE.test(raw) || /基础经营数据|增值税计算明细|附加税及其他税种明细|税负分析/.test(raw)){
+      section = sectionOf(raw);
+      continue;
+    }
     const rm = raw.match(/(\d+(?:\.\d+)?)%$/);          // 名字末尾带税率的（劳务收入 6%）
     const label = raw.replace(/[（(].*?[)）]/g,"").replace(/\d+(?:\.\d+)?%$/,"");
-    if(!label || SKIP_LABELS.has(label)) continue;
+    if(!label || SKIP_LABELS.has(label) || /^(备注|说明|注[:：]|合计|小计|总计|累计)/.test(label)) continue;
     if(rm) rates[label] = +rm[1];
     const vals = {};
     for(const [mn, ci] of Object.entries(monthCols)){
@@ -1446,15 +1463,27 @@ function applyMatrix(matrix){
         if(isFinite(v)) vals[+mn-1] = neg ? -Math.abs(v) : v;
       }
     }
-    if(Object.keys(vals).length) picked[label] = vals;
+    /* 同名项目在两处出现（出口免税既在收入区又在税费区）时，以先出现的为准，
+       但只要有任何一个出现在「基础经营数据」区，就认定它是收入项 */
+    if(!(label in picked)) secOf[label] = section;
+    if(section === "income") secOf[label] = "income";
+    if(!(label in picked) || Object.keys(vals).length) picked[label] = vals;
   }
   if(!Object.keys(picked).length) throw new Error("没识别到任何税种行（货物收入/销项税/进项税…）");
 
   /* 第二遍：名称对到行。表里有、本地没有的行自动建出来，不丢数 */
-  const map = {}, created = [];
+  const map = {}, created = [], converted = [];
   Object.keys(picked).forEach(label=>{
     const f = LABELS[label];
     if(f === "output" || f === "inputTax" || f === "cost"){ map[label] = f; return; }
+    /* 这一项该是什么类型：免税类 → 收入项（税率 0）；收入区 → 收入项；
+       税费区 → 手工税费；没有分节信息时按名字判断 */
+    const sec = secOf[label] || "";
+    const wantFee = !isExempt(label) &&
+      (sec === "fee" || sec === "vat" || (!sec && /税|金|费|附加|基金/.test(label)));
+    const rate = rates[label] !== undefined ? rates[label]
+               : (isExempt(label) ? 0 : guessIncomeRate(label));
+
     let row = S.rows.find(x=>x.name === label) || (f ? S.rows.find(x=>x.id === f) : null);
     if(!row){
       const d = DEF_ROWS.find(x=>x.name === label) || (f ? DEF_ROWS.find(x=>x.id === f) : null);
@@ -1462,16 +1491,22 @@ function applyMatrix(matrix){
         row = Object.assign({}, d);
         S.rows.push(row); created.push(row.name);
       }else if(label.length <= 20 && /[\u4e00-\u9fa5A-Za-z]/.test(label)){
-        /* 台账里没有这个项目 → 自动建一行。
-           名字像税费（税/金/费/附加/基金）就建成手工税费，否则建成收入项。
-           收入项税率优先用原表里带的（如「劳务收入 6%」），没带就按名字猜，猜不到给 0。 */
-        const isFee = /税|金|费|附加|基金/.test(label);
-        const rate = rates[label] !== undefined ? rates[label] : guessIncomeRate(label);
-        row = isFee
-          ? {id:newRowId(), kind:"input",  name:label}
-          : {id:newRowId(), kind:"income", name:label, rate};
+        row = wantFee ? {id:newRowId(), kind:"input",  name:label}
+                      : {id:newRowId(), kind:"income", name:label, rate};
         S.rows.push(row); created.push(row.name);
       }
+    }else if(!wantFee && row.kind !== "income"){
+      /* 台账里已经有一行同名的手工税费（例如以前导入时把「出口免税」当成税费建过），
+         而它其实是收入项 → 就地改成收入项，金额从「税金合计」挪到「收入合计」 */
+      S.months.forEach(m=>{
+        if(!has(m[OV(row.id)])) return;
+        if(!has(m[row.id])) m[row.id] = m[OV(row.id)];
+        delete m[OV(row.id)];
+      });
+      row.kind = "income";
+      row.rate = rates[label] !== undefined ? rates[label] : (isExempt(label) ? 0 : (row.rate || 0));
+      delete row.half;
+      converted.push(row.name);
     }
     if(row) map[label] = row.id;
   });
@@ -1522,7 +1557,7 @@ function applyMatrix(matrix){
   }
   S.months = fresh;
   buildGrid(); syncControls(); paint(); save();
-  return {manCount, newTax: created.length, created};
+  return {manCount, newTax: created.length, created, converted};
 }
 function impMsg(r){
   const p = [];
@@ -1530,6 +1565,10 @@ function impMsg(r){
   if(r && r.newTax){
     const names = (r.created || []).slice(0,3).join("、") + ((r.created || []).length > 3 ? " 等" : "");
     p.push("新增 " + r.newTax + " 行（" + names + "）");
+  }
+  if(r && r.converted && r.converted.length){
+    const names = r.converted.slice(0,3).join("、") + (r.converted.length > 3 ? " 等" : "");
+    p.push("「" + names + "」按收入项处理（税率 0）");
   }
   return p.length ? "，" + p.join("，") : "";
 }
