@@ -255,7 +255,9 @@ const FIXED = {
   output:  {id:"output",   kind:"output",    name:"销项税"},
   inputTax:{id:"inputTax", kind:"inputTax",  name:"进项税"},
   preVat:  {id:"preVat",   kind:"preVat",    name:"预缴房产增值税"},
+  carryIn: {id:"carryIn",  kind:"carryIn",   name:"期初留抵税额"},
   vat:     {id:"vat",      kind:"vat",       name:"增值税"},
+  carryOut:{id:"carryOut", kind:"carryOut",  name:"期末留抵税额"},
   preCity: {id:"preCity",  kind:"preCity",   name:"预缴房产城建税"},
   total:   {id:"total",    kind:"total",     name:"税金合计"}
 };
@@ -263,8 +265,11 @@ const KINDS = ["income","vatRate","input"];
 const OV = id => id + "Override";
 const isEdit = r => r.kind === "income" || r.kind === "input" || r.kind === "inputTax" ||
                     r.kind === "cost" || r.kind === "preVat";
-/* 双态行：既能自动算、也能手改（销项税、附加税费、预缴房产城建税） */
-const isHyb  = r => r.kind === "output" || r.kind === "vatRate" || r.kind === "preCity";
+/* 双态行：既能自动算、也能手改（销项税、附加税费、预缴房产城建税、期初留抵） */
+const isHyb  = r => r.kind === "output" || r.kind === "vatRate" || r.kind === "preCity" ||
+                    r.kind === "carryIn";
+/* 留抵行：合计/累计都没有意义（是时点数，不是发生额），汇总处留空 */
+const isCarryRow = r => !!r && (r.kind === "carryIn" || r.kind === "carryOut");
 const isPctRow = r => !!r && r.kind === "margin";
 /* 城建税行：附加税费里税率最高的那一档，也是预缴房产城建税的税率来源。
    不限定 kind —— 老的/导入的表里城建税可能是手工税费行 */
@@ -295,7 +300,8 @@ function defOrder(){
   const out = [];
   S.rows.filter(r=>r.kind === "income").forEach(r=>out.push(r.id));
   out.push(FIXED.income.id, FIXED.cost.id, FIXED.gross.id, FIXED.margin.id);
-  out.push(FIXED.output.id, FIXED.inputTax.id, FIXED.preVat.id, FIXED.vat.id);
+  out.push(FIXED.output.id, FIXED.inputTax.id, FIXED.preVat.id,
+           FIXED.carryIn.id, FIXED.vat.id, FIXED.carryOut.id);
   /* 预缴房产城建税紧跟城建税行（没有城建税行就放在附加税费末尾） */
   let cityPlaced = false;
   S.rows.filter(r=>r.kind === "vatRate").forEach(r=>{
@@ -460,7 +466,7 @@ function cityRateInfo(){
   const half = r ? (r.half ? k : 1) : k;
   return { rate, half, pct: rate * half };
 }
-function calcMonth(m){
+function calcMonth(m, carryInArg){
   /* 1. 收入合计 = 当前所有收入项之和；销项税 = 各收入项 × 各自税率之和 */
   let income = 0, autoOutput = 0;
   S.rows.forEach(r=>{
@@ -472,13 +478,18 @@ function calcMonth(m){
   income = r2(income);
   autoOutput = r2(autoOutput);
 
-  /* 2. 销项税可手改；增值税 = 销项税 − 进项税 − 预缴房产增值税 */
+  /* 2. 销项税可手改；增值税 = 销项税 − 进项税 − 预缴房产增值税 − 期初留抵
+        结果小于 0 就是留抵，全额结转到下月继续抵，不做退税处理 */
   const manOutput = has(m[OV("output")]);
   const output = manOutput ? r2(num(m[OV("output")])) : autoOutput;
   const inputTax = num(m.inputTax);
   const preVat = num(m.preVat);          // 异地房产已预缴的增值税，申报时抵减
-  const vat = r2(output - inputTax - preVat);
+  const manCarryIn = has(m[OV("carryIn")]);
+  const carryIn = (carryInArg !== undefined) ? r2(carryInArg)
+                : (manCarryIn ? r2(num(m[OV("carryIn")])) : 0);
+  const vat = r2(output - inputTax - preVat - carryIn);
   const base = Math.max(vat, 0);              // 附加税基数：留抵时取 0
+  const carryOut = r2(Math.max(-vat, 0));     // 期末留抵，结转到下月
   const k = S.halve ? 0.5 : 1;
 
   /* 3. 预缴房产城建税：以「预缴房产增值税」为计税依据，与城建税互不影响 */
@@ -518,14 +529,35 @@ function calcMonth(m){
 
   vals.income = income; vals.output = output; vals.inputTax = inputTax;
   vals.preVat = preVat; vals.preCity = preCity;
-  vals.vat = vat; vals.total = total;
+  vals.carryIn = carryIn; vals.carryOut = carryOut;
+  /* 增值税行显示「本月应纳」：销项不足抵扣时显示 0，抵扣不完的部分走期末留抵行，
+     这样 12 个月的增值税加起来就是全年真实应交，不会因为负数把别的月份冲掉 */
+  vals.vat = base; vals.total = total;
   vals.cost = cost; vals.gross = gross; vals.margin = margin;
   auto.output = autoOutput; manual.output = manOutput;
   auto.preCity = autoPreCity; manual.preCity = manPreCity;
+  manual.carryIn = manCarryIn;
 
   return { income, output, inputTax, preVat, preCity, preCityAuto:autoPreCity,
-           vat, base, total, vals, auto, autoRaw, manual,
+           carryIn, carryOut, vat, base, total, vals, auto, autoRaw, manual,
            vatFee, other: otherFee, cost, gross, margin, costFilled };
+}
+/* 逐月算一遍，把留抵按月结转：本期期末留抵 = 下月期初留抵（1 月可手填上年结转）。
+   n 只有 12，直接顺序走一遍，比到处传参省事 */
+function calcSeries(){
+  const out = [];
+  let carry = 0;
+  for(let i=0;i<N;i++){
+    const m = S.months[i];
+    const man = has(m[OV("carryIn")]);
+    const ci = man ? r2(num(m[OV("carryIn")])) : (i === 0 ? 0 : carry);
+    const c = calcMonth(m, ci);
+    c.carryInAuto = (i === 0 ? 0 : carry);
+    c.carryManual = man;
+    out.push(c);
+    carry = c.carryOut;
+  }
+  return out;
 }
 /* 老存档里「预缴房产城建税」是手填值存在 m.preCity，现在改成双态行（自动 = 预缴增值税×税率），
    把老值搬到 override 位置，保持显示不变 */
@@ -582,7 +614,9 @@ function rateTag(r){
   if(r.kind === "preVat")   return '<i>手工 · 抵减增值税</i>';
   if(r.kind === "preCity")  return '<i>预缴增值税×税率</i>';
   if(r.kind === "output")   return '<i>可手改</i>';
-  if(r.kind === "vat")      return '<i>销项−进项−预缴</i>';
+  if(r.kind === "carryIn")  return '<i>上月结转 · 可改</i>';
+  if(r.kind === "carryOut") return '<i>结转下期</i>';
+  if(r.kind === "vat")      return '<i>销项−进项−预缴−留抵</i>';
   if(r.kind === "gross")    return '<i>收入−成本</i>';
   if(r.kind === "margin")   return '<i>毛利÷收入</i>';
   return '';
@@ -831,7 +865,8 @@ function delRow(id){
 function onInput(f, i, kind, el){
   const raw = el.value.replace(/,/g,"").replace(/[^\d.\-]/g,"");
   if(raw !== el.value) el.value = raw;
-  if(kind === "output" || kind === "vatRate" || kind === "preCity") S.months[i][OV(f)] = (raw === "" ? null : raw);
+  if(kind === "output" || kind === "vatRate" || kind === "preCity" || kind === "carryIn")
+    S.months[i][OV(f)] = (raw === "" ? null : raw);
   else S.months[i][f] = raw;
   paint(); save();
 }
@@ -863,16 +898,19 @@ function setCalc(td, v, kind, blankMonth){
   td.textContent = fmt(v);
   td.classList.toggle("neg", v < -0.004);
   td.classList.toggle("zero", Math.abs(v) < 0.005);
-  td.title = (kind === "vat" && v < 0) ? "留抵（进项＋预缴大于销项），附加税基数取 0" : "";
+  td.title = (kind === "vat")
+    ? "本月应纳增值税 = 销项税 − 进项税 − 预缴房产增值税 − 期初留抵（不够抵的部分见「期末留抵税额」）"
+    : (kind === "carry" && v > 0 ? "本月应纳增值税为 0，这笔留抵结转到下月继续抵扣" : "");
 }
 
 /* 某区间（含端点）的累计值 */
 function rangeSum(a, b){
   const rows = rowsOf(), o = {}, seen = {};
+  const cols = calcSeries();
   rows.forEach(r=>{ o[r.id] = 0; seen[r.id] = false; });
   let any = false, anyCost = false;
   for(let i=a;i<=b;i++){
-    const m = S.months[i], c = calcMonth(m);
+    const m = S.months[i], c = cols[i];
     if(!isBlank(m)) any = true;
     if(has(m.cost)) anyCost = true;
     rows.forEach(r=>{
@@ -885,6 +923,8 @@ function rangeSum(a, b){
     });
   }
   rows.forEach(r=>{ o[r.id] = r2(o[r.id]); });
+  /* 留抵是月初/月末时点数，累计相加没有意义，汇总处留空 */
+  rows.filter(isCarryRow).forEach(r=>{ o[r.id] = null; });
   /* 毛利/毛利率不是可加量：毛利率用「累计毛利 ÷ 累计收入」，没有成本数据时留空 */
   if(anyCost) o.margin = o.income ? o.gross / o.income : null;
   else { o.gross = null; o.margin = null; }
@@ -892,11 +932,8 @@ function rangeSum(a, b){
 }
 
 function paint(){
-  const cols = [];
-  for(let i=0;i<N;i++){
-    normalizePreCity(S.months[i]);
-    cols.push(calcMonth(S.months[i]));
-  }
+  for(let i=0;i<N;i++) normalizePreCity(S.months[i]);
+  const cols = calcSeries();
   const rows = rowsOf();
 
   view.forEach(v=>{
@@ -928,19 +965,26 @@ function paint(){
       setVal(inputs[r.id + "_" + i], m[r.id]);
     });
 
-    /* 双态行（销项税、附加税费、预缴房产城建税）：自动值 + 可手改 + ↺ 还原 */
+    /* 双态行（销项税、附加税费、预缴房产城建税、期初留抵）：自动值 + 可手改 + ↺ 还原 */
     rows.filter(isHyb).forEach(r=>{
       const el = inputs[r.id + "_" + i];
       if(!el) return;
+      const isCarry = r.kind === "carryIn";
       const man = c.manual[r.id];
-      const val = man ? m[OV(r.id)] : c.auto[r.id];
-      if(blankMonth && !man){
+      const autoVal = isCarry ? c.carryInAuto : c.auto[r.id];
+      const val = man ? m[OV(r.id)] : autoVal;
+      /* 期初留抵要显示上月结转过来的数，哪怕本月没有任何数据 */
+      if(blankMonth && !man && !(isCarry && num(autoVal))){ 
         if(document.activeElement !== el) el.value = "";
       }else{
         setVal(el, val);
       }
       el.parentElement.classList.toggle("manual", man);
-      el.title = r.kind === "preCity"
+      el.title = isCarry
+        ? (man ? "手动值（上月期末留抵 " + fmt(c.carryInAuto) + "），点 ↺ 恢复自动结转"
+               : (i === 0 ? "1 月可手填上年结转的留抵，其余月份自动结转上月期末留抵"
+                          : "自动结转上月期末留抵 " + fmt(c.carryInAuto) + "，可直接改成手填值"))
+        : r.kind === "preCity"
         ? (man ? "手动值（预缴增值税 " + fmt(c.preVat) + " × " + fmt(cityRateInfo().pct) + "% = " + fmt(c.auto.preCity) + "），点 ↺ 恢复自动"
                : "自动计算：预缴房产增值税 " + fmt(c.preVat) + " × " + fmt(cityRateInfo().pct) + "%，可直接改成手填值")
         : (man ? "手动值（自动值应为 " + fmt(c.auto[r.id]) + "），点 ↺ 恢复自动"
@@ -949,8 +993,8 @@ function paint(){
 
     /* 只读计算行 */
     rows.filter(r=> !isEdit(r) && !isHyb(r)).forEach(r=>{
-      setCalc(calcCells[r.id + "_" + i], c.vals[r.id],
-              r.kind === "vat" ? "vat" : (isPctRow(r) ? "pct" : null), blankMonth);
+      const kind = r.kind === "vat" ? "vat" : (isPctRow(r) ? "pct" : (isCarryRow(r) ? "carry" : null));
+      setCalc(calcCells[r.id + "_" + i], c.vals[r.id], kind, blankMonth && !num(c.vals[r.id]));
     });
   });
 
@@ -960,6 +1004,7 @@ function paint(){
 
   const T = {};
   rows.forEach(r=>{
+    if(isCarryRow(r)){ T[r.id] = null; return; }
     if(r.kind === "gross"){ T[r.id] = anyCost ? sumGr : null; return; }
     if(r.kind === "margin"){ T[r.id] = (anyCost && sumIn) ? sumGr / sumIn : null; return; }
     T[r.id] = isEdit(r)
@@ -989,10 +1034,11 @@ function paint(){
 
 /* ---------- 面板 ---------- */
 function paintPanel(){
-  const cur = calcMonth(S.months[sel]);
+  const cols = calcSeries();
+  const cur = cols[sel];
   let ci=0, cv=0, ct=0, cg=0, cc=0;
   for(let i=0;i<=sel;i++){
-    const c = calcMonth(S.months[i]);
+    const c = cols[i];
     ci += c.income; cv += c.base; ct += c.total; cg += (c.gross || 0);
     cc += (c.costFilled ? c.cost : 0);
   }
@@ -1004,6 +1050,7 @@ function paintPanel(){
     row("毛利", cur.gross === null ? '<span class="muted">—</span>' : fmt(cur.gross)) +
     row("毛利率", cur.gross === null ? '<span class="muted">—</span>' : pctTxt(pct(cur.gross, cur.income)), "big") +
     row("增值税（应纳）", fmt(cur.base)) +
+    (cur.carryOut ? row("期末留抵（结转下期）", fmt(cur.carryOut)) : "") +
     row("税金合计", fmt(cur.total)) +
     row("本月增值税税负率", pctTxt(pct(cur.base, cur.income)), "big") +
     row("本月综合税负率", pctTxt(pct(cur.total, cur.income)), "big");
@@ -1015,6 +1062,7 @@ function paintPanel(){
     row("累计毛利", fmt(r2(cg))) +
     row("累计毛利率", pctTxt(ytdPct), "big") +
     row("累计增值税", fmt(r2(cv))) +
+    (cur.carryOut ? row("期末留抵（结转下期）", fmt(cur.carryOut)) : "") +
     row("累计税金合计", fmt(r2(ct))) +
     row("本年增值税税负率", pctTxt(pct(cv, ci)), "big") +
     row("本年综合税负率", pctTxt(pct(ct, ci)), "big");
@@ -1055,9 +1103,14 @@ function paintPanel(){
       fmt(cur.income) + ' － 主营业务成本 ' + (cur.costFilled ? fmt(cur.cost) : '<span class="muted">未填</span>') +
       (cur.margin === null ? '' : '　<span class="muted">毛利率 ' + pctTxt(pct(cur.gross, cur.income)) + '</span>') + '</p>' +
     '<p><b>销项税 ' + fmt(cur.output) + '</b> ＝ ' + outLine + manTags + '</p>' +
-    '<p><b>增值税 ' + fmt(cur.vat) + '</b> ＝ 销项税 ' + fmt(cur.output) + ' － 进项税 ' + fmt(num(m.inputTax)) +
+    '<p><b>增值税 ' + fmt(cur.base) + '</b>（本月应纳）＝ 销项税 ' + fmt(cur.output) + ' － 进项税 ' + fmt(num(m.inputTax)) +
       (cur.preVat ? ' － 预缴房产增值税 ' + fmt(cur.preVat) : '') +
-      (cur.vat < 0 ? '　<span class="muted">（留抵，附加税基数取 0）</span>' : '') + '</p>' +
+      (cur.carryIn ? ' － 期初留抵税额 ' + fmt(cur.carryIn) : '') +
+      (cur.vat < 0 ? '　<span class="muted">（算得 ' + fmt(cur.vat) + '，本月应纳取 0，全额留抵结转下期）</span>' : '') + '</p>' +
+    (cur.carryOut
+      ? '<p>期末留抵 <b>' + fmt(cur.carryOut) + '</b> ＝ 销项税＋期初留抵 － 进项税 － 预缴房产增值税' +
+        '　<span class="muted">（本月不交增值税，结转到 ' + (sel + 2 <= 12 ? (sel + 2) + ' 月继续抵扣' : '下一年度继续抵扣') + '）</span></p>'
+      : '') +
     '<p>附加税费基数 <b>' + fmt(cur.base) + '</b> × ' + k + '：' + rateLine + '</p>' +
     (cur.preVat || cur.preCity
       ? '<p>预缴房产城建税 <b>' + fmt(cur.preCity) + '</b> ＝ 预缴房产增值税 ' + fmt(cur.preVat) +
@@ -1254,8 +1307,9 @@ function exportExcel(){
   const pInc = {}, pRate = {};
   incRows.forEach(r=>{ pInc[r.id] = 0; });
   rateRows.forEach(r=>{ pRate[r.id] = 0; });
+  const series = calcSeries();
   for(let i=0;i<N;i++){
-    const m = S.months[i], c = calcMonth(m);
+    const m = S.months[i], c = series[i];
     incRows.forEach(r=>{ pInc[r.id] += num(m[r.id]); });
     rateRows.forEach(r=>{ pRate[r.id] += (c.vals[r.id] || 0); });
     pI += c.income; pO += c.output; pN += num(m.inputTax); pV += c.base; pT += c.total; pX += c.other;
@@ -1290,6 +1344,7 @@ function exportExcel(){
     const ns = opts.tot ? STY.totN : STY.num;
     const ps = opts.tot ? STY.totP : STY.pct;
     const asPct = isPctRow(r);
+    const noSum = isCarryRow(r);          // 留抵是时点数，合计列留空
     const cells = [{t:"s", v:opts.name || r.name, s:lstyle}];
     let sum = 0, any = false, sumG = 0, sumI = 0;
     months.forEach(a=>{
@@ -1301,12 +1356,18 @@ function exportExcel(){
         return;
       }
       let v = null;
-      if(!a.blank) v = isEdit(r) ? (has(m[r.id]) ? num(m[r.id]) : null) : c.vals[r.id];
+      if(noSum){
+        /* 留抵要按结转链逐月给值，空月份也照填（上月留抵会顺延下来） */
+        v = c.vals[r.id];
+        if(!v) v = null;
+      }else if(!a.blank){
+        v = isEdit(r) ? (has(m[r.id]) ? num(m[r.id]) : null) : c.vals[r.id];
+      }
       cells.push(numCell(v, ns));
       if(v !== null && v !== undefined){ sum += v; any = true; }
     });
     cells.push(asPct ? pctCell(any && sumI ? sumG / sumI : null, ps)
-                     : numCell(any ? sum : null, ns));
+                     : numCell(noSum ? null : (any ? sum : null), ns));
     rows.push({cells});
   };
 
@@ -1321,7 +1382,9 @@ function exportExcel(){
   addRow(FIXED.output);
   addRow(FIXED.inputTax);
   addRow(FIXED.preVat);
+  addRow(FIXED.carryIn);
   addRow(FIXED.vat, {red:true});
+  addRow(FIXED.carryOut);
 
   section("三、附加税及其他税种明细");
   let cityRowSeen = false;
@@ -1380,7 +1443,9 @@ function exportExcel(){
   pushRow("销项税",       a=>a.c.output, a=>a.pO);
   pushRow("进项税",       a=> has(a.m.inputTax) ? num(a.m.inputTax) : null, a=>a.pN);
   pushRow("预缴房产增值税", a=> has(a.m.preVat) ? num(a.m.preVat) : null, a=>a.pPv);
+  pushRow("期初留抵税额",  a=> a.c.carryIn || null, ()=>null);
   pushRow("增值税(应纳)", a=>a.c.base,  a=>a.pV, 0, 1);
+  pushRow("期末留抵税额",  a=> a.c.carryOut || null, a=> a.c.carryOut);
   let cityDone = false;
   rateRows.forEach(r=>{
     pushRow(r.name, a=>a.c.vals[r.id], a=>a.pRate[r.id]);
@@ -1527,6 +1592,9 @@ const LABELS = {
   /* 异地房产预缴：预缴增值税抵减应纳增值税；预缴城建税按预缴增值税单算，独立计入合计 */
   "预缴房产增值税":"preVat", "房产增值税":"preVat", "预缴增值税":"preVat", "异地预缴增值税":"preVat",
   "预缴房产城建税":"preCity", "房产城建税":"preCity", "预缴城建税":"preCity", "异地预缴城建税":"preCity",
+  /* 留抵：期初留抵来自上期结转，期末留抵是计算出来的（导入时跳过） */
+  "期初留抵税额":"carryIn", "期初留抵":"carryIn", "上期留抵税额":"carryIn", "上期留抵":"carryIn",
+  "留抵税额":"carryIn", "留抵进项":"carryIn", "期末留抵税额":"carryOut", "期末留抵":"carryOut",
 };
 /* 名称归一：文件里常写「应交城市维护建设税」「本期进项税额」，去掉前缀再查一次 */
 function labelId(label){
@@ -1700,8 +1768,9 @@ function applyMatrix(matrix, fileName){
   const map = {}, created = [], converted = [];
   Object.keys(picked).forEach(label=>{
     const f = labelId(label);
+    if(f === "carryOut"){ return; }        // 期末留抵是算出来的，导入时丢掉
     if(f === "output" || f === "inputTax" || f === "cost" ||
-       f === "preVat" || f === "preCity"){ map[label] = f; return; }
+       f === "preVat" || f === "preCity" || f === "carryIn"){ map[label] = f; return; }
     /* 这一项该是什么类型：免税类 → 收入项（税率 0）；收入区 → 收入项；
        税费区 → 手工税费；没有分节信息时按名字判断 */
     const sec = secOf[label] || "";
@@ -1744,7 +1813,8 @@ function applyMatrix(matrix, fileName){
     if(!key) return;
     const vals = picked[label];
     const row = key === "output" ? null : S.rows.find(x=>x.id === key);
-    const dual = key === "output" || key === "preCity" || (row && row.kind === "vatRate");
+    const dual = key === "output" || key === "preCity" || key === "carryIn" ||
+                 (row && row.kind === "vatRate");
     for(let i=0;i<N;i++){
       if(vals[i] === undefined) continue;
       if(dual) fresh[i][OV(key)] = String(vals[i]);
@@ -1775,13 +1845,25 @@ function applyMatrix(matrix, fileName){
     }
   }
 
+  /* 期初留抵：文件里的数与「上月期末留抵」一致就转成自动结转（1 月的 0 也回归自动） */
+  let prevCarry = 0;
+  for(let i=0;i<N;i++){
+    const m = fresh[i];
+    const expect = (i === 0 ? 0 : prevCarry);         // 自动结转值
+    if(has(m[OV("carryIn")]) &&
+       Math.abs(num(m[OV("carryIn")]) - expect) <= 0.005) delete m[OV("carryIn")];
+    const ci = has(m[OV("carryIn")]) ? num(m[OV("carryIn")]) : expect;
+    prevCarry = calcMonth(m, ci).carryOut;
+  }
+
   /* 全 0 且无手改值的月份还原成空白月（旧表把空月写成 0.00） */
   for(let i=0;i<N;i++){
     const m = fresh[i];
     const allZero = (!has(m.inputTax) || num(m.inputTax) === 0)
       && (!has(m.cost) || num(m.cost) === 0)
       && (!has(m.preVat) || num(m.preVat) === 0)
-      && (!has(m[OV("preCity")]) || num(m[OV("preCity")]) === 0) && S.rows.every(r=>{
+      && (!has(m[OV("preCity")]) || num(m[OV("preCity")]) === 0)
+      && (!has(m[OV("carryIn")]) || num(m[OV("carryIn")]) === 0) && S.rows.every(r=>{
       if(r.kind === "vatRate") return !has(m[OV(r.id)]);
       if(r.kind === "income" || r.kind === "input") return !has(m[r.id]) || num(m[r.id]) === 0;
       return true;
