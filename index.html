@@ -199,10 +199,10 @@ td.cum.neg{color:var(--red);}
     </div>
     <div class="spacer"></div>
     <button id="btnTheme" title="切换外观">浅色</button>
-    <button id="btnImport">导入 Excel</button>
-    <button id="btnExport" class="primary">导出 Excel</button>
-    <button id="btnSave">导出存档</button>
-    <button id="btnLoad">读取存档</button>
+    <button id="btnImport" title="默认打开上次导入/保存的那个文件夹（Chrome / Edge）">导入 Excel</button>
+    <button id="btnExport" class="primary" title="默认保存到上次导出的文件夹（Chrome / Edge）">导出 Excel</button>
+    <button id="btnSave" title="默认保存到上次导出的文件夹（Chrome / Edge）">导出存档</button>
+    <button id="btnLoad" title="默认打开上次导入/保存的那个文件夹（Chrome / Edge）">读取存档</button>
     <button id="btnClear" class="danger">清空</button>
     <input type="file" id="fileInput" accept=".json,application/json" hidden>
     <input type="file" id="xlsInput" accept=".xlsx,.xlsm,.xls,.csv,.htm,.html,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" hidden>
@@ -1202,6 +1202,117 @@ function download(blob, name){
   setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 1500);
 }
 
+/* ---------- 记住上次的文件夹 ----------
+   <input type=file> 和 a[download] 都无法指定目录（浏览器不给权限），
+   所以走 File System Access API：选择器把上次用的文件 handle 当 startIn 传回去，
+   浏览器就会定位到同一个文件夹。handle 存在 IndexedDB 里（可跨会话）。
+   不支持的浏览器（Safari / Firefox / file:// 打开）自动退回原来的 input + 下载。 */
+const FSA_OK = typeof window !== "undefined" &&
+               typeof window.showOpenFilePicker === "function" &&
+               typeof window.showSaveFilePicker === "function" &&
+               location.protocol !== "file:" &&      // 双击本地 html 打开时选择器会抛 SecurityError，直接用老办法
+               window.isSecureContext !== false;
+const FS_DB = "tax-ledger-fs", FS_STORE = "handles";
+const FS_MEM = { lastFile:null, lastSave:null };     // 页面载入时预热，点按钮时不用再等 IDB
+function fsDb(){
+  return new Promise((res, rej)=>{
+    if(!("indexedDB" in window)) return rej(new Error("no idb"));
+    const r = indexedDB.open(FS_DB, 1);
+    r.onupgradeneeded = ()=>{ if(!r.result.objectStoreNames.contains(FS_STORE)) r.result.createObjectStore(FS_STORE); };
+    r.onsuccess = ()=> res(r.result);
+    r.onerror = ()=> rej(r.error);
+  });
+}
+/* IDB 只在 https 下稳定；file:// 或隐私模式下可能一直不回调，所以都加超时兜底 */
+const raceTimeout = (p, ms) => Promise.race([p, new Promise(r=>setTimeout(()=>r(null), ms))]);
+async function fsGet(key){
+  try{
+    return await raceTimeout((async ()=>{
+      const db = await fsDb();
+      return await new Promise(res=>{
+        const q = db.transaction(FS_STORE, "readonly").objectStore(FS_STORE).get(key);
+        q.onsuccess = ()=> res(q.result || null);
+        q.onerror = ()=> res(null);
+      });
+    })(), 1200);
+  }catch(e){ return null; }
+}
+/* 记忆先落在内存里（当次会话立刻生效），IDB 写盘不阻塞调用方 */
+function fsSet(key, h){
+  FS_MEM[key] = h;
+  raceTimeout((async ()=>{
+    const db = await fsDb();
+    return new Promise(res=>{
+      const tx = db.transaction(FS_STORE, "readwrite");
+      tx.objectStore(FS_STORE).put(h, key);
+      tx.oncomplete = ()=> res(1);
+      tx.onerror = ()=> res(null);
+    });
+  })(), 1500).catch(()=>{});
+}
+if(FSA_OK) (async ()=>{
+  /* 只补空的：用户可能在本轮已经选过文件，别让慢半拍的 IDB 把它覆盖成 null */
+  const f = await fsGet("lastFile");
+  if(f && !FS_MEM.lastFile) FS_MEM.lastFile = f;
+  const v = await fsGet("lastSave");
+  if(v && !FS_MEM.lastSave) FS_MEM.lastSave = v;
+})();
+/* 选择要读的文件：返回 File（选中）、null（用户取消）、undefined（不支持，调用方退回 input） */
+async function pickFile(kind){
+  if(!FSA_OK) return undefined;
+  const types = kind === "json"
+    ? [{description:"存档 JSON", accept:{"application/json":[".json"]}}]
+    : [{description:"Excel / CSV", accept:{
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":[".xlsx",".xlsm"],
+        "application/vnd.ms-excel":[".xls"],
+        "text/csv":[".csv"],
+        "text/html":[".htm",".html"]}}];
+  const startIn = FS_MEM.lastFile || FS_MEM.lastSave || null;
+  const tries = startIn ? [startIn, null] : [null];   // startIn 失效就重开一次不带的
+  for(const si of tries){
+    try{
+      const opts = { multiple:false, excludeAcceptAllOption:false, types };
+      if(si) opts.startIn = si;
+      const picked = await window.showOpenFilePicker(opts);
+      const h = picked && picked[0];
+      if(!h) return null;
+      fsSet("lastFile", h);
+      return await h.getFile();
+    }catch(e){
+      if(e && e.name === "AbortError") return null;     // 用户按了取消
+    }
+  }
+  return undefined;
+}
+/* 保存文件：返回实际文件名（保存成功/回退下载）或 null（用户取消） */
+async function saveFile(blob, name, key){
+  if(!FSA_OK){ download(blob, name); return name; }
+  const startIn = FS_MEM[key] || FS_MEM.lastSave || FS_MEM.lastFile || null;
+  const tries = startIn ? [startIn, null] : [null];
+  let h = null;
+  for(const si of tries){
+    try{
+      const opts = { suggestedName:name };
+      if(si) opts.startIn = si;
+      h = await window.showSaveFilePicker(opts);
+      break;
+    }catch(e){
+      if(e && e.name === "AbortError") return null;     // 用户按了取消
+    }
+  }
+  if(!h){ download(blob, name); return name; }          // 选择器不可用 → 退回浏览器下载
+  try{
+    fsSet(key, h);
+    const w = await h.createWritable();
+    await w.write(blob);
+    await w.close();
+    return h.name;
+  }catch(e){
+    download(blob, name);
+    return name;
+  }
+}
+
 /* ================= 真 xlsx 导出（自写 ZIP + OOXML） ================= */
 const CRC_T = (()=>{ const t=new Uint32Array(256);
   for(let n=0;n<256;n++){ let c=n; for(let k=0;k<8;k++) c = (c&1) ? (0xEDB88320 ^ (c>>>1)) : (c>>>1); t[n]=c>>>0; }
@@ -1318,7 +1429,7 @@ const STYLES_XML = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
 /* 10 合计行百分比 */ '<xf numFmtId="165" fontId="1" fillId="4" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="right" vertical="center"/></xf>' +
 '</cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>';
 
-function exportExcel(){
+async function exportExcel(){
   const W = 1 + N + 1;
   const lastCol = colName(W);
   const merges = [];
@@ -1520,8 +1631,9 @@ function exportExcel(){
     {name:"xl/worksheets/sheet1.xml", data:enc.encode(sheetXml(rows, merges, 1))},
     {name:"xl/worksheets/sheet2.xml", data:enc.encode(sheetXml(rows2, merges2, 1))}
   ];
-  download(zipStore(files), (co ? co + "_" : "") + "税金台账_" + S.year + ".xlsx");
-  toast("已导出 xlsx（含明细台账 + 税负率两个工作表）");
+  const fname = (co ? co + "_" : "") + "税金台账_" + S.year + ".xlsx";
+  const saved = await saveFile(zipStore(files), fname, "lastSave");
+  if(saved) toast("已保存 " + saved + "（含明细台账 + 税负率两个工作表）");
 }
 
 /* ================= 导入（xlsx / xls-html / csv） ================= */
@@ -2006,41 +2118,52 @@ $("btnTheme").addEventListener("click", ()=>{
   applyTheme(); save();
 });
 $("btnExport").addEventListener("click", exportExcel);
-$("btnImport").addEventListener("click", ()=> $("xlsInput").click());
+/* 导入：支持文件夹记忆的浏览器直接开选择器（定位到上次的文件夹），其余退回隐藏 input */
+$("btnImport").addEventListener("click", async ()=>{
+  const f = await pickFile("excel");
+  if(f === undefined){ $("xlsInput").click(); return; }
+  if(f) importExcel(f);
+});
 $("xlsInput").addEventListener("change", e=>{
   const f = e.target.files && e.target.files[0];
   if(f) importExcel(f);
   e.target.value = "";
 });
-$("btnSave").addEventListener("click", ()=>{
-  download(new Blob([JSON.stringify(S,null,2)],{type:"application/json"}), "税金台账存档_" + S.year + ".json");
+$("btnSave").addEventListener("click", async ()=>{
+  const name = "税金台账存档_" + S.year + ".json";
+  const saved = await saveFile(new Blob([JSON.stringify(S,null,2)],{type:"application/json"}), name, "lastSave");
+  if(saved) toast("存档已保存 " + saved);
 });
-$("btnLoad").addEventListener("click", ()=> $("fileInput").click());
+/* 存档读取：同样记住上次的文件夹 */
+async function loadArchive(file){
+  const text = await file.text();
+  try{
+    const s = JSON.parse(text);
+    const rows = migrateRows(s, DEF_ROWS);
+    Object.assign(S, s);
+    S.months = Array.from({length:N}, (_,i)=>Object.assign({}, (s.months||[])[i]||{}));
+    S.rows = rows;
+    S.order = Array.isArray(s.order) ? s.order.slice() : [];
+    S.seq = Math.max(1, +s.seq || 1);
+    S.rows.forEach(r=>{
+      const n = +String(r.id).replace(/^\D+/,"");
+      if(isFinite(n) && n >= S.seq) S.seq = n + 1;
+    });
+    delete S.rates; delete S.taxes; delete S.showStamp; delete S.showIncomeTax;
+    foldPrepaidRows();
+    migratePreCity();
+    buildGrid(); syncControls(); paint(); save();
+    toast("存档已载入，共 " + S.rows.length + " 个项目行");
+  }catch(err){ alert("存档格式不对：" + err.message); }
+}
+$("btnLoad").addEventListener("click", async ()=>{
+  const f = await pickFile("json");
+  if(f === undefined){ $("fileInput").click(); return; }
+  if(f) loadArchive(f);
+});
 $("fileInput").addEventListener("change", e=>{
   const f = e.target.files && e.target.files[0];
-  if(!f) return;
-  const rd = new FileReader();
-  rd.onload = () => {
-    try{
-      const s = JSON.parse(rd.result);
-      const rows = migrateRows(s, DEF_ROWS);
-      Object.assign(S, s);
-      S.months = Array.from({length:N}, (_,i)=>Object.assign({}, (s.months||[])[i]||{}));
-      S.rows = rows;
-      S.order = Array.isArray(s.order) ? s.order.slice() : [];
-      S.seq = Math.max(1, +s.seq || 1);
-      S.rows.forEach(r=>{
-        const n = +String(r.id).replace(/^\D+/,"");
-        if(isFinite(n) && n >= S.seq) S.seq = n + 1;
-      });
-      delete S.rates; delete S.taxes; delete S.showStamp; delete S.showIncomeTax;
-      foldPrepaidRows();
-      migratePreCity();
-      buildGrid(); syncControls(); paint(); save();
-      toast("存档已载入，共 " + S.rows.length + " 个项目行");
-    }catch(err){ alert("存档格式不对：" + err.message); }
-  };
-  rd.readAsText(f, "utf-8");
+  if(f) loadArchive(f);
   e.target.value = "";
 });
 $("btnClear").addEventListener("click", ()=>{
