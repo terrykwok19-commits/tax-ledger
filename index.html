@@ -306,9 +306,12 @@ const FIXED = {
    对应桌面「映射表.xlsx」的四列：台账项目 / 余额表科目编码 / 余额表科目名称 / 取数口径（余额表列）。
    成本类科目的发生额在借方（贷方只有结转），所以「主营业务成本」取借方；
    其余收入类取贷方、进项税取借方、计提类税费取贷方。用户可以用「导入余额表」直接选自己的映射表替换。 */
+/* 映射表：一条 = 一个台账项目从余额表的哪个科目、哪一列取数
+   co   —— 适用公司（留空 = 所有公司通用；只写简称也行，如「磐实」）
+   only —— "fallback"：只在没有任何收入明细取到数时才用，给只有收入汇总科目 5001 的公司兜底
+   成本、增值税、附加税费各家编码一模一样，走通用；只有收入明细各家编码不同，按公司分开配 */
 const DEF_MAP = [
-  {item:"货物收入",       code:"500104",   name:"内销商品收入",       col:"本期发生额·贷方"},
-  {item:"服务收入",       code:"500103",   name:"服务收入",           col:"本期发生额·贷方"},
+  /* ===== 通用：所有公司科目编码一致 ===== */
   {item:"主营业务成本",   code:"5401",     name:"主营业务成本",       col:"本期发生额·借方"},
   {item:"销项税",         code:"22210105", name:"销项税额",           col:"本期发生额·贷方"},
   {item:"进项税",         code:"22210101", name:"进项税额",           col:"本期发生额·借方"},
@@ -319,9 +322,60 @@ const DEF_MAP = [
   {item:"地方教育附加",   code:"222110",   name:"应交地方教育费附加", col:"本期发生额·贷方"},
   {item:"印花税",         code:"222104",   name:"应交印花税",         col:"本期发生额·贷方"},
   {item:"企业所得税",     code:"222103",   name:"应交所得税",         col:"本期发生额·贷方"},
-  {item:"房产税",         code:"222113",   name:"应交房产税",         col:"本期发生额·贷方"}
+  {item:"房产税",         code:"222113",   name:"应交房产税",         col:"本期发生额·贷方"},
+
+  /* ===== 收入明细：编码各家不同（同为「服务收入」有的是 500103、有的是 500107），按公司分开 ===== */
+  /* 广州金哪达贸易有限公司 */
+  {co:"广州金哪达贸易有限公司", item:"货物收入", code:"500104", name:"内销商品收入", col:"本期发生额·贷方"},
+  {co:"广州金哪达贸易有限公司", item:"服务收入", code:"500103", name:"服务收入",     col:"本期发生额·贷方"},
+  {co:"广州金哪达贸易有限公司", item:"租金收入", code:"500106", name:"租金收入",     col:"本期发生额·贷方"},
+  /* 广州磐实供应链有限公司 */
+  {co:"广州磐实供应链有限公司", item:"货物收入", code:"500101", name:"内销商品收入",     col:"本期发生额·贷方"},
+  {co:"广州磐实供应链有限公司", item:"服务收入", code:"500107", name:"仓储包装服务收入", col:"本期发生额·贷方"},
+  {co:"广州磐实供应链有限公司", item:"租金收入", code:"500108", name:"租金收入",         col:"本期发生额·贷方"},
+  /* 广州粤书亚贸易有限公司 */
+  {co:"广州粤书亚贸易有限公司", item:"货物收入", code:"500101", name:"内销商品收入", col:"本期发生额·贷方"},
+  {co:"广州粤书亚贸易有限公司", item:"外销收入", code:"500102", name:"外销商品收入", col:"本期发生额·贷方"},
+  {co:"广州粤书亚贸易有限公司", item:"服务收入", code:"500103", name:"服务收入",     col:"本期发生额·贷方"},
+  /* 广州超影拍科技有限公司 */
+  {co:"广州超影拍科技有限公司", item:"货物收入", code:"500101", name:"内销商品收入", col:"本期发生额·贷方"},
+  /* 广州提斯利科技有限公司 */
+  {co:"广州提斯利科技有限公司", item:"货物收入", code:"500101", name:"货物收入",     col:"本期发生额·贷方"},
+  /* 广州灵感矩阵科技有限公司 */
+  {co:"广州灵感矩阵科技有限公司", item:"服务收入", code:"500107", name:"服务收入",   col:"本期发生额·贷方"},
+  /* 广州频闪传媒有限公司 */
+  {co:"广州频闪传媒有限公司",     item:"服务收入", code:"500107", name:"服务收入",   col:"本期发生额·贷方"},
+
+  /* ===== 兜底：收入不分明细、只有「主营业务收入 5001」汇总的公司（金哪达科技、拍剪） ===== */
+  {item:"货物收入", code:"5001", name:"主营业务收入", col:"本期发生额·贷方", only:"fallback"}
 ];
 const mapRows = () => (Array.isArray(S.mapRows) && S.mapRows.length) ? S.mapRows : DEF_MAP;
+/* 公司名宽松比对：去空格、去括号备注、去地域前缀与公司后缀，「磐实」也能对上「广州磐实供应链有限公司」 */
+function normCo(s){
+  return String(s == null ? "" : s).replace(/\s+/g,"").replace(/[（(].*?[)）]/g,"")
+    .replace(/^(广州|广东|深圳|东莞|佛山|中国)/,"")
+    .replace(/(有限责任公司|有限公司|集团|股份|公司)$/,"");
+}
+function coHit(a, b){
+  const A = normCo(a), B = normCo(b);
+  if(!A || !B) return false;
+  return A === B || A.indexOf(B) >= 0 || B.indexOf(A) >= 0;
+}
+/* 某公司该用的映射：专属行优先（同名项目盖掉通用行），通用行补空，兜底行恒排在最后 ——
+   返回 {rows, own, gen, fb}，own/gen 只用来在弹窗里报数 */
+function mapRowsFor(company){
+  const all = mapRows();
+  const own = [], gen = [];
+  all.forEach(x=>{
+    if(x.only === "fallback") return;
+    if(x.co){ if(coHit(x.co, company)) own.push(x); }
+    else gen.push(x);
+  });
+  const seen = new Set(own.map(x=>keyOf(x.item)));
+  const rows = own.concat(gen.filter(x=>!seen.has(keyOf(x.item))));
+  const fb = all.filter(x=>x.only === "fallback");
+  return {rows: rows.concat(fb), own: own.length, gen: gen.length, fb: fb.length};
+}
 const KINDS = ["income","vatRate","input"];
 const OV = id => id + "Override";
 const isEdit = r => r.kind === "income" || r.kind === "input" || r.kind === "inputTax" ||
@@ -1742,7 +1796,14 @@ function parseShared(xml){
   }
   return out;
 }
-const unesc = s => String(s).replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&amp;/g,"&");
+/* XML 文本还原：命名实体 + 数字字符引用都要解 —— openpyxl 等工具会把中文写成 &#21488; / &#x53F0;，
+   只解 &amp; 这类命名实体的话，读进来就是一串「&#21488;&#36134;」乱码 */
+const unesc = s => String(s)
+  .replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&quot;/g,'"')
+  .replace(/&apos;/g,"'").replace(/&#39;/g,"'").replace(/&nbsp;/g," ")
+  .replace(/&amp;/g,"&")
+  .replace(/&#(\d+);/g, (m,d)=>{ const n = +d; return n > 0 && n <= 0x10FFFF ? String.fromCodePoint(n) : m; })
+  .replace(/&#x([0-9a-fA-F]+);/g, (m,h)=>{ const n = parseInt(h,16); return n > 0 && n <= 0x10FFFF ? String.fromCodePoint(n) : m; });
 
 function sheetToMatrix(xml, shared){
   const rows = [];
@@ -1835,6 +1896,8 @@ const SKIP_LABELS = new Set([
 const CALC_LABEL_RE = /^(本期|本月|本年|当月|当期)?(应交|应纳|应缴)?(增值税|税金及附加|税费|税额)(合计|小计)?$/;
 /* 新行默认税率：名字里带「服务」按 6%，带货物/销售/商品按 13%，其余先给 0（点百分比可改） */
 function guessIncomeRate(name){
+  if(/租金|租赁/.test(name)) return 9;
+  if(/外销|出口/.test(name)) return 0;              // 出口免税，销项不在收入行上算
   if(/服务|劳务/.test(name)) return /服务/.test(name) ? 6 : 0;
   if(/货物|销售|商品|产品/.test(name)) return 13;
   return 0;
@@ -2312,8 +2375,9 @@ function balPut(m, t, v){
   m[k] = String(r2(v));
   return k;
 }
-/* 第一遍：只算「打算写什么」，一格都不改台账（给预览弹窗用） */
-function planBalance(matrix, fileName, mapList){
+/* 第一遍：只算「打算写什么」，一格都不改台账（给预览弹窗用）
+   —— 按余额表里的「核算单位 / 文件名」认公司，取这家公司该用的映射（专属 + 通用 + 兜底） */
+function planBalance(matrix, fileName){
   const per = balPeriod(matrix, fileName);
   if(!per.month) throw new Error("没认出所属年月 —— 表头或文件名里要有「2026年10月」或「2026-10」");
   const cols = balCols(matrix);
@@ -2322,9 +2386,13 @@ function planBalance(matrix, fileName, mapList){
   if(!codes.length) throw new Error("余额表里没有数据行");
 
   const mi = per.month - 1;
-  const lines = [], miss = [];
+  const company = balCompany(matrix, fileName);
+  const pack = mapRowsFor(company);
+  const lines = [], miss = [], byItem = new Map();
+  let incomeHit = 0, usedFallback = 0;
 
-  mapList.forEach(it=>{
+  /* 吃一条映射：同一台账项目命中多条明细（比如几笔服务收入分两个科目）就累加，仍算一行 */
+  function feed(it){
     const item = keyOf(it.item), code = keyOf(it.code), wantName = keyOf(it.name);
     if(!item) return;
     let row = byCode[code], usedCode = code;
@@ -2332,29 +2400,34 @@ function planBalance(matrix, fileName, mapList){
       const alt = codes.find(c=>keyOf((byCode[c]||[])[1]) === wantName);
       if(alt){ row = byCode[alt]; usedCode = alt; }
     }
-    if(!row){ miss.push(item + "（科目 " + code + (wantName ? " " + wantName : "") + " 在余额表里没找到）"); return; }
+    if(!row){
+      if(!byItem.has(item)) miss.push(item + "（科目 " + code + (wantName ? " " + wantName : "") + " 在余额表里没找到）");
+      return;
+    }
     const pick = balPickCol(cols, it.col);
-    if(!pick){ miss.push(item + "（取数口径「" + it.col + "」对不上余额表的列）"); return; }
-
-    /* 严格按映射口径的那一列取数：本期发生额为空就说明这个月没发生，不取值、也不改取对方方向。
-       要看借方/贷方就改映射表里的「取数口径」。 */
+    if(!pick){
+      if(!byItem.has(item)) miss.push(item + "（取数口径「" + it.col + "」对不上余额表的列）");
+      return;
+    }
     const raw = cellNum(row[pick.c]);
     const acct = usedCode + " " + (wantName || keyOf(row[1]) || "");
-    if(raw === null){
-      /* 只是提示一下对面有数，便于发现映射口径写反了；提示归提示，不取值 */
+    const prev = byItem.get(item);
+
+    /* 严格按映射口径的那一列取数：本期发生额为空就说明这个月没发生，不取值、也不改取对方方向 */
+    if(raw === null || Math.abs(raw) < 0.005){
+      if(prev) return;                               // 同一项目别的明细已经取到数，这条空的直接忽略
       let hint = "";
-      if(pick.other >= 0){
+      if(raw === null && pick.other >= 0){
         const o = cellNum(row[pick.other]);
         if(o !== null && Math.abs(o) >= 0.005)
           hint = "（" + (pick.side === "C" ? "借方" : "贷方") + "有 " + fmt(Math.abs(o)) + "，要取请改口径）";
       }
-      lines.push({item, acct, col: pick.label, v: 0, skip: true, note: "本期发生额为空，未取值" + hint, ovKey: ""});
+      const l = {item, acct, col: pick.label, v: 0, skip: true, isIncome:false, ovKey: "",
+                 note: (raw === null ? "本期发生额为空，未取值" : "本期发生额为 0，未取值") + hint};
+      byItem.set(item, l); lines.push(l);
       return;
     }
-    if(Math.abs(raw) < 0.005){
-      lines.push({item, acct, col: pick.label, v: 0, skip: true, note: "本期发生额为 0，未取值", ovKey: ""});
-      return;
-    }
+
     const t = balTarget(item, true);                 // dry：只判断落到哪一行，不建行
     if(!balPutKey(t)){ miss.push(item + "（这一项不能直接填数）"); return; }
     /* 收入项按「借方」口径取到的是冲减（退货/红字），取负号；成本、税费按借侧是正常发生额，保持正数 */
@@ -2362,12 +2435,35 @@ function planBalance(matrix, fileName, mapList){
     const v = (isIncome && pick.side === "D") ? -raw : raw;
     let note = (isIncome && pick.side === "D") ? "按借方口径取数，作冲减" : "";
     if(t.created) note = (note ? note + "；" : "") + "新建行「" + t.created + "」";
-    lines.push({item, acct, col: pick.label, v: r2(v), note, ovKey: ""});
-  });
 
-  return {per, mi, lines, miss,
-          company: balCompany(matrix, fileName),
-          mapCount: mapList.length, mapCustom: Array.isArray(S.mapRows) && S.mapRows.length > 0,
+    if(prev && !prev.skip){                          // 同一项目第 2、3 条明细 → 累加
+      prev.v = r2(prev.v + v);
+      prev.acct += " + " + usedCode;
+      if(note) prev.note = prev.note ? prev.note + "；" + note : note;
+      return;
+    }
+    if(prev && prev.skip){                           // 之前那条是空的，这条取到了 → 顶替掉
+      prev.skip = false; prev.v = r2(v); prev.acct = acct; prev.col = pick.label;
+      prev.note = note; prev.isIncome = isIncome;
+    }else{
+      const l = {item, acct, col: pick.label, v: r2(v), skip: false, note, isIncome, ovKey: ""};
+      byItem.set(item, l); lines.push(l);
+    }
+    if(isIncome) incomeHit++;
+  }
+
+  /* 第一轮只跑常规映射；一条收入明细都没取到时，才启用「收入汇总 5001」兜底 */
+  pack.rows.filter(x=>x.only !== "fallback").forEach(feed);
+  if(!incomeHit && pack.fb){
+    const before = incomeHit;
+    pack.rows.filter(x=>x.only === "fallback").forEach(feed);
+    usedFallback = incomeHit > before ? 1 : 0;
+  }
+
+  return {per, mi, lines, miss, company,
+          mapCount: pack.own + pack.gen, mapOwn: pack.own, mapGen: pack.gen,
+          usedFallback, noCompany: !company,
+          mapCustom: Array.isArray(S.mapRows) && S.mapRows.length > 0,
           wrote: lines.filter(l=>!l.skip).length};
 }
 /* 第二遍：用户点「确认写入」后，才真按 plan 改台账 */
@@ -2419,7 +2515,11 @@ function parseMapSheet(matrix){
     item: head.findIndex(c=>/台账项目/.test(c)),
     code: head.findIndex(c=>/余额表科目|科目编码|科目代码/.test(c)),
     name: head.findIndex(c=>/科目名称/.test(c)),
-    col:  head.findIndex(c=>/取数口径|口径|余额表列/.test(c))
+    col:  head.findIndex(c=>/取数口径|口径|余额表列/.test(c)),
+    /* 适用公司：留空 = 所有公司通用 */
+    co:   head.findIndex(c=>/适用公司|核算单位|账套|^公司$|公司名称/.test(c)),
+    /* 条件：写「兜底」= 只在没有收入明细取到数时才用 */
+    cond: head.findIndex(c=>/^条件$|兜底|备注类型/.test(c))
   };
   if(idx.item < 0 || idx.code < 0) return null;
   const out = [];
@@ -2427,14 +2527,17 @@ function parseMapSheet(matrix){
     const row = matrix[i] || [];
     const item = keyOf(row[idx.item]), code = keyOf(row[idx.code]);
     if(!item || !code) continue;
+    const cond = idx.cond >= 0 ? keyOf(row[idx.cond]) : "";
     out.push({item, code,
               name: idx.name >= 0 ? keyOf(row[idx.name]) : "",
-              col:  idx.col  >= 0 ? keyOf(row[idx.col])  : "本期发生额·贷方"});
+              col:  idx.col  >= 0 ? keyOf(row[idx.col])  : "本期发生额·贷方",
+              co:   idx.co   >= 0 ? keyOf(row[idx.co])   : "",
+              only: /兜底|后备|汇总/.test(cond) ? "fallback" : ""});
   }
   return out.length ? out : null;
 }
 let balUndoState = null;
-let balPending = null;                 // 等着确认的导入：{matrix, fileName, mapList, plan}
+let balPending = null;                 // 等着确认的导入：{matrix, fileName, plan}
 async function importBalance(file){
   try{
     const matrix = await readMatrix(file);
@@ -2444,16 +2547,15 @@ async function importBalance(file){
       toast("映射表已更新：" + asMap.length + " 项，下次导入余额表按新映射取数");
       return;
     }
-    balPending = {matrix, fileName: file.name, mapList: mapRows(), plan: null};
-    refreshBalPreview();               // 只算不写，先给预览
+    balPending = {matrix, fileName: file.name, plan: null};
+    refreshBalPreview();               // 只算不写，先给预览（内部按公司挑映射）
   }catch(err){
     alert("余额表读取失败：" + err.message);
   }
 }
 function refreshBalPreview(){
   if(!balPending) return;
-  balPending.mapList = mapRows();
-  balPending.plan = planBalance(balPending.matrix, balPending.fileName, balPending.mapList);
+  balPending.plan = planBalance(balPending.matrix, balPending.fileName);
   showBalPreview(balPending.plan);
 }
 /* 确认写入：这一步才真改台账 */
@@ -2488,19 +2590,28 @@ function balBtns(preview){
   $("balMapBtn").hidden = !preview;
   $("balResetMap").hidden = !preview;
 }
+/* 映射来源说明：这家公司专属几项、通用几项、有没有走收入汇总兜底 */
+function mapNote(r){
+  return "映射 " + r.mapCount + " 项（" + (r.company ? "本家专属 " + r.mapOwn + " + " : "") +
+         "通用 " + r.mapGen + (r.mapCustom ? "，自定义" : "，内置") + "）" +
+         (r.usedFallback ? " · 已启用收入汇总兜底" : "");
+}
 function showBalPreview(r){
   const skipped = r.lines.filter(l=>l.skip);
   const hasData = Object.keys(S.months[r.mi] || {}).length > 0;
   $("balHead").innerHTML = "余额表导入预览 · " + r.per.year + " 年 " + r.per.month + " 月" +
     '<span class="muted">' + (r.company ? "核算单位 " + esc(r.company) + " · " : "") +
-    "只写 " + r.per.month + " 月这一列，其它月份不动 · 映射 " + r.mapCount + " 项" +
-    (r.mapCustom ? "（自定义）" : "（内置）") + " · 尚未写入</span>";
+    "只写 " + r.per.month + " 月这一列，其它月份不动 · " + mapNote(r) + " · 尚未写入</span>";
   $("balBody").innerHTML = balTable(r) +
+    (r.noCompany ? '<div class="tip" style="color:var(--red)">没从余额表里认出是哪家公司（表头缺「核算单位：」、' +
+      "文件名也不带公司名），只能用通用映射，收入多半取不到。</div>" : "") +
     (hasData ? '<div class="tip" style="color:var(--manual-bd)">注意：' + r.per.month +
       " 月这一列原来已经有数，确认后会被本次结果覆盖（写错了可以撤销）。</div>" : "") +
     '<div class="tip"><b>还没写进台账。</b>确认后把上面 ' + r.wrote + " 项写进 " + r.per.month + " 月" +
     (skipped.length ? "，跳过 " + skipped.length + " 项（" + skipped.map(l=>esc(l.item)).join("、") + "）" : "") +
-    "。只按映射口径那一列取「本期发生额」，那一列是空的就当这个月没发生、不取值；要看借方或贷方，先改「取数口径」再导一次。</div>";
+    "。只按映射口径那一列取「本期发生额」，那一列是空的就当这个月没发生、不取值；要看借方或贷方，先改「取数口径」再导一次。" +
+    (r.usedFallback ? "本家余额表里收入只有「主营业务收入」汇总科目，按兜底规则整笔记到「货物收入」，税率可能不准——销项税仍以余额表为准。" : "") +
+    "</div>";
   balBtns(true);
   $("balMask").classList.add("on");
 }
@@ -2508,7 +2619,7 @@ function showBalDone(r){
   const skipped = r.lines.filter(l=>l.skip);
   $("balHead").innerHTML = "已写入 · " + r.per.year + " 年 " + r.per.month + " 月" +
     '<span class="muted">' + (r.company ? "核算单位 " + esc(r.company) + " · " : "") +
-    "写入 " + r.wrote + " 项，其它月份未改动</span>";
+    "写入 " + r.wrote + " 项，其它月份未改动 · " + mapNote(r) + "</span>";
   $("balBody").innerHTML = balTable(r) +
     '<div class="tip">已写进 ' + r.per.month + " 月这一列" +
     (skipped.length ? "，跳过 " + skipped.length + " 项（" + skipped.map(l=>esc(l.item)).join("、") + "）" : "") +
