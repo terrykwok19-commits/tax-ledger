@@ -225,6 +225,8 @@ td.cum.neg{color:var(--red);}
     <button id="btnTheme" title="切换外观">浅色</button>
     <button id="btnImport" title="默认打开上次导入/保存的那个文件夹（Chrome / Edge）">导入 Excel</button>
     <button id="btnBalance" title="导入「科目余额表」xlsx：按映射表把本期发生额自动填进文件标注的那个月份（选映射表文件也能更新映射）">导入余额表</button>
+    <button id="btnMapIn" title="导入「映射表」xlsx 更新当前映射（列：台账项目 / 适用公司 / 余额表科目编码 / 科目名称 / 取数口径 / 条件）">导入映射</button>
+    <button id="btnMapOut" title="把当前生效的映射导出成 xlsx：改完再用「导入映射」导回来就完成更新">导出映射</button>
     <button id="btnExport" class="primary" title="默认保存到上次导出的文件夹（Chrome / Edge）">导出 Excel</button>
     <button id="btnSave" title="默认保存到上次导出的文件夹（Chrome / Edge）">导出存档</button>
     <button id="btnLoad" title="默认打开上次导入/保存的那个文件夹（Chrome / Edge）">读取存档</button>
@@ -232,6 +234,7 @@ td.cum.neg{color:var(--red);}
     <input type="file" id="fileInput" accept=".json,application/json" hidden>
     <input type="file" id="xlsInput" accept=".xlsx,.xlsm,.xls,.csv,.htm,.html,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" hidden>
     <input type="file" id="balInput" accept=".xlsx,.xlsm,.xls,.csv,.htm,.html,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" hidden>
+    <input type="file" id="mapInput" accept=".xlsx,.xlsm,.xls,.csv,.htm,.html,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" hidden>
   </div>
 
   <div class="tablewrap"><table id="grid"></table></div>
@@ -251,7 +254,8 @@ td.cum.neg{color:var(--red);}
     <div class="dlg-b" id="balBody"></div>
     <div class="dlg-f">
       <button class="left" id="balUndo" hidden title="把这个月恢复到写入前的样子">撤销本次写入</button>
-      <button id="balMapBtn" title="选一个「映射表.xlsx」替换当前映射（列：台账项目 / 余额表科目编码 / 余额表科目名称 / 取数口径）">更新映射表</button>
+      <button id="balMapBtn" title="选一个「映射表.xlsx」替换当前映射（列：台账项目 / 适用公司 / 余额表科目编码 / 科目名称 / 取数口径 / 条件）">更新映射表</button>
+      <button id="balExportMap" title="把当前生效的映射导出成 xlsx，改完再导回来就是更新">导出映射表</button>
       <button id="balResetMap" title="回到内置的默认映射">恢复默认映射</button>
       <button id="balCancel" hidden title="什么都不改，关掉预览">取消</button>
       <button id="balOk" class="primary" hidden title="按上面这个表写入台账">确认写入</button>
@@ -340,16 +344,20 @@ const DEF_MAP = [
   {co:"广州粤书亚贸易有限公司", item:"服务收入", code:"500103", name:"服务收入",     col:"本期发生额·贷方"},
   /* 广州超影拍科技有限公司 */
   {co:"广州超影拍科技有限公司", item:"货物收入", code:"500101", name:"内销商品收入", col:"本期发生额·贷方"},
+  {co:"广州超影拍科技有限公司", item:"服务收入", code:"500107", name:"服务收入",     col:"本期发生额·贷方"},
   /* 广州提斯利科技有限公司 */
   {co:"广州提斯利科技有限公司", item:"货物收入", code:"500101", name:"货物收入",     col:"本期发生额·贷方"},
+  {co:"广州提斯利科技有限公司", item:"服务收入", code:"500102", name:"服务收入",     col:"本期发生额·贷方"},
   /* 广州灵感矩阵科技有限公司 */
   {co:"广州灵感矩阵科技有限公司", item:"服务收入", code:"500107", name:"服务收入",   col:"本期发生额·贷方"},
   /* 广州频闪传媒有限公司 */
   {co:"广州频闪传媒有限公司",     item:"服务收入", code:"500107", name:"服务收入",   col:"本期发生额·贷方"},
   /* 广州金哪达科技有限公司 */
   {co:"广州金哪达科技有限公司",   item:"货物收入", code:"500101", name:"内销商品收入", col:"本期发生额·贷方"},
+  {co:"广州金哪达科技有限公司",   item:"服务收入", code:"500102", name:"服务收入",     col:"本期发生额·贷方"},
   /* 广州拍剪科技有限公司 */
-  {co:"广州拍剪科技有限公司",     item:"货物收入", code:"500101", name:"货物收入",     col:"本期发生额·贷方"}
+  {co:"广州拍剪科技有限公司",     item:"货物收入", code:"500101", name:"货物收入",     col:"本期发生额·贷方"},
+  {co:"广州拍剪科技有限公司",     item:"服务收入", code:"500103", name:"服务收入",     col:"本期发生额·贷方"}
 ];
 const mapRows = () => (Array.isArray(S.mapRows) && S.mapRows.length) ? S.mapRows : DEF_MAP;
 /* 公司名宽松比对：去空格、去括号备注、去地域前缀与公司后缀，「磐实」也能对上「广州磐实供应链有限公司」 */
@@ -1474,16 +1482,19 @@ const esc = s => String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>
 const colName = n => { let s=""; while(n>0){ const m=(n-1)%26; s=String.fromCharCode(65+m)+s; n=(n-m-1)/26; } return s; };
 
 const STY = {head:1, num:2, pct:3, text:4, title:5, sec:6, red:7, totL:8, totN:9, totP:10};
-function sheetXml(rows, merges, freeze){
+function sheetXml(rows, merges, freeze, widths){
+  const cols = (widths && widths.length)
+    ? '<cols>' + widths.map((w,i)=>'<col min="'+(i+1)+'" max="'+(i+1)+'" width="'+w+'" customWidth="1"/>').join('') + '</cols>'
+    : '<cols><col min="1" max="1" width="26" customWidth="1"/>' +
+      '<col min="2" max="13" width="13.5" customWidth="1"/>' +
+      '<col min="14" max="14" width="15" customWidth="1"/></cols>';
   let x = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
     '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
     '<sheetViews><sheetView workbookViewId="0">' +
     (freeze ? '<pane xSplit="1" ySplit="2" topLeftCell="B3" activePane="bottomRight" state="frozen"/>' : '') +
     '</sheetView></sheetViews>' +
     '<sheetFormatPr defaultRowHeight="18"/>' +
-    '<cols><col min="1" max="1" width="26" customWidth="1"/>' +
-    '<col min="2" max="13" width="13.5" customWidth="1"/>' +
-    '<col min="14" max="14" width="15" customWidth="1"/></cols>' +
+    cols +
     '<sheetData>';
   rows.forEach((row, ri)=>{
     const r = ri + 1;
@@ -1752,6 +1763,74 @@ async function exportExcel(){
   const fname = (co ? co + "_" : "") + "税金台账_" + S.year + ".xlsx";
   const saved = await saveFile(zipStore(files), fname, "lastSave");
   if(saved) toast("已保存 " + saved + "（含明细台账 + 税负率两个工作表）");
+}
+
+/* ================= 映射表：导出 / 导入 =================
+   导出的列和「导入映射」认的列完全一致（台账项目 / 适用公司 / 余额表科目编码 / 科目名称 /
+   取数口径 / 条件），所以 导出 → 改 → 导回来 就是一条维护闭环。
+   导出的永远是「当前生效」那份：导过映射表就是那份，没导过就是内置 DEF_MAP。 */
+function mapMatrix(){
+  const head = ["台账项目","适用公司","余额表科目编码","科目名称","取数口径","条件"];
+  const mat = [head.map(v=>({t:"s", v:v, s:STY.head}))];
+  mapRows().forEach(x=>{
+    mat.push([
+      {t:"s", v:String(x.item == null ? "" : x.item), s:STY.text},
+      {t:"s", v:String(x.co   == null ? "" : x.co),   s:STY.text},
+      {t:"s", v:String(x.code == null ? "" : x.code), s:STY.text},
+      {t:"s", v:String(x.name == null ? "" : x.name), s:STY.text},
+      {t:"s", v:String(x.col  == null ? "" : x.col),  s:STY.text},
+      {t:"s", v:x.only === "fallback" ? "兜底" : "",  s:STY.text}
+    ]);
+  });
+  return mat;
+}
+async function exportMapSheet(){
+  const rows = mapRows();
+  const enc = new TextEncoder();
+  const files = [
+    {name:"[Content_Types].xml", data:enc.encode('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+      '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+      '<Default Extension="xml" ContentType="application/xml"/>' +
+      '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
+      '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' +
+      '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>' +
+      '</Types>')},
+    {name:"_rels/.rels", data:enc.encode('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+      '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>' +
+      '</Relationships>')},
+    {name:"xl/workbook.xml", data:enc.encode('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" ' +
+      'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>' +
+      '<sheet name="映射表" sheetId="1" r:id="rId1"/></sheets></workbook>')},
+    {name:"xl/_rels/workbook.xml.rels", data:enc.encode('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+      '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>' +
+      '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>' +
+      '</Relationships>')},
+    {name:"xl/styles.xml", data:enc.encode(STYLES_XML)},
+    {name:"xl/worksheets/sheet1.xml", data:enc.encode(sheetXml(mapMatrix(), [], 0, [24, 30, 16, 26, 18, 10]))}
+  ];
+  const d = new Date(), p2 = n => (n < 10 ? "0" : "") + n;
+  const fname = "映射表_多公司_" + d.getFullYear() + p2(d.getMonth()+1) + p2(d.getDate()) + ".xlsx";
+  const saved = await saveFile(zipStore(files), fname, "lastFile");
+  if(saved){
+    toast("已导出映射表 " + rows.length + " 项（" +
+          (Array.isArray(S.mapRows) && S.mapRows.length ? "当前自定义映射" : "内置映射") + "）：" + saved);
+  }
+}
+/* 读一个映射表文件替换当前映射：「导入映射」和弹窗里的「更新映射表」共用 */
+async function importMapFile(f){
+  try{
+    const asMap = parseMapSheet(await readMatrix(f));
+    if(!asMap || !asMap.length) throw new Error("表头里没找到「台账项目 / 余额表科目编码」，或者一行有效映射都没有");
+    const own = asMap.filter(x=>x.co).length;
+    S.mapRows = asMap; save();
+    toast("映射表已更新：" + f.name + "（" + asMap.length + " 项：通用 " + (asMap.length - own) +
+          " + 按公司 " + own + "）" + (balPending ? "，预览已按新映射重算" : ""));
+    if(balPending) refreshBalPreview();
+  }catch(err){ alert("映射表读取失败：" + err.message); }
 }
 
 /* ================= 导入（xlsx / xls-html / csv） ================= */
@@ -2403,7 +2482,8 @@ function planBalance(matrix, fileName){
       if(alt){ row = byCode[alt]; usedCode = alt; }
     }
     if(!row){
-      if(!byItem.has(item)) miss.push(item + "（科目 " + code + (wantName ? " " + wantName : "") + " 在余额表里没找到）");
+      if(!byItem.has(item)) miss.push(item + "（余额表里没有科目 " + code + (wantName ? " " + wantName : "") +
+                                        "，本期无发生额或尚未启用）");
       return;
     }
     const pick = balPickCol(cols, it.col);
@@ -2590,6 +2670,7 @@ function balBtns(preview){
   $("balOk").hidden     = !preview;
   $("balClose").hidden  = preview;
   $("balMapBtn").hidden = !preview;
+  $("balExportMap").hidden = !preview;
   $("balResetMap").hidden = !preview;
 }
 /* 映射来源说明：这家公司专属几项、通用几项、有没有走收入汇总兜底 */
@@ -2685,18 +2766,21 @@ $("balMask").addEventListener("click", e=>{ if(e.target === $("balMask")) hideBa
 document.addEventListener("keydown", e=>{
   if(e.key === "Escape" && $("balMask").classList.contains("on")) hideBal();
 });
-$("balMapBtn").addEventListener("click", async ()=>{
+/* 映射表：导入（工具栏 / 弹窗内共用一套逻辑）、导出 */
+async function pickMapFile(fallbackInput){
   const f = await pickFile("excel");
-  if(f === undefined){ $("balInput").click(); return; }
-  if(!f) return;
-  try{
-    const asMap = parseMapSheet(await readMatrix(f));
-    if(!asMap) throw new Error("表头里没找到「台账项目 / 余额表科目编码」");
-    S.mapRows = asMap; save();
-    toast("映射表已换成 " + f.name + "（" + asMap.length + " 项），预览已按新映射重算");
-    if(balPending) refreshBalPreview();          // 换映射后预览立刻跟着变
-  }catch(err){ alert("映射表读取失败：" + err.message); }
+  if(f === undefined){ $(fallbackInput).click(); return; }
+  if(f) importMapFile(f);
+}
+$("btnMapIn").addEventListener("click", ()=>pickMapFile("mapInput"));
+$("btnMapOut").addEventListener("click", exportMapSheet);
+$("mapInput").addEventListener("change", e=>{
+  const f = e.target.files && e.target.files[0];
+  if(f) importMapFile(f);
+  e.target.value = "";
 });
+$("balMapBtn").addEventListener("click", ()=>pickMapFile("balInput"));   // 换映射后预览自动重算
+$("balExportMap").addEventListener("click", exportMapSheet);
 $("balResetMap").addEventListener("click", ()=>{
   S.mapRows = null; save();
   toast("已恢复内置映射（" + DEF_MAP.length + " 项），预览已按新映射重算");
