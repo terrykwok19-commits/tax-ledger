@@ -173,6 +173,30 @@ td.cum.neg{color:var(--red);}
   border:1px solid var(--line-strong);border-radius:10px;padding:10px 18px;box-shadow:var(--shadow);
   font-size:12.5px;opacity:0;pointer-events:none;transition:opacity .2s;z-index:99;}
 .toast.on{opacity:1;}
+/* ---------- 余额表导入结果 ---------- */
+.mask{position:fixed;inset:0;background:rgba(12,18,28,.44);display:none;z-index:120;
+  align-items:center;justify-content:center;padding:24px;}
+.mask.on{display:flex;}
+.dlg{background:var(--card);border:1px solid var(--line-strong);border-radius:14px;
+  box-shadow:var(--shadow);width:min(880px,100%);max-height:84vh;display:flex;flex-direction:column;}
+.dlg-h{padding:13px 18px;border-bottom:1px solid var(--line);font-size:14px;font-weight:600;
+  display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;}
+.dlg-h .muted{font-weight:400;font-size:12px;}
+.dlg-b{padding:10px 18px 14px;overflow:auto;}
+.dlg-b table{width:100%;border-collapse:collapse;font-size:12.5px;}
+.dlg-b th,.dlg-b td{padding:5px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;}
+.dlg-b th:nth-child(3),.dlg-b td:nth-child(3),
+.dlg-b th:nth-child(4),.dlg-b td:nth-child(4){white-space:nowrap;}
+.dlg-b th{color:var(--muted);font-weight:500;background:var(--head-bg);position:sticky;top:0;
+  box-shadow:0 1px 0 var(--line);}
+.dlg-b td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;}
+.dlg-b td.note{color:var(--muted);}
+.dlg-b td.note.warn{color:var(--red);}
+.dlg-b td.note.fb{color:var(--manual-bd);}
+.dlg-b .tip{margin:10px 2px 0;color:var(--muted);font-size:12px;line-height:1.7;}
+.dlg-f{padding:10px 18px;border-top:1px solid var(--line);display:flex;gap:8px;
+  justify-content:flex-end;flex-wrap:wrap;}
+.dlg-f .left{margin-right:auto;}
 @media (max-width:1200px){.panel{grid-template-columns:1fr 1fr;}}
 </style>
 </head>
@@ -200,12 +224,14 @@ td.cum.neg{color:var(--red);}
     <div class="spacer"></div>
     <button id="btnTheme" title="切换外观">浅色</button>
     <button id="btnImport" title="默认打开上次导入/保存的那个文件夹（Chrome / Edge）">导入 Excel</button>
+    <button id="btnBalance" title="导入「科目余额表」xlsx：按映射表把本期发生额自动填进文件标注的那个月份（选映射表文件也能更新映射）">导入余额表</button>
     <button id="btnExport" class="primary" title="默认保存到上次导出的文件夹（Chrome / Edge）">导出 Excel</button>
     <button id="btnSave" title="默认保存到上次导出的文件夹（Chrome / Edge）">导出存档</button>
     <button id="btnLoad" title="默认打开上次导入/保存的那个文件夹（Chrome / Edge）">读取存档</button>
     <button id="btnClear" class="danger">清空</button>
     <input type="file" id="fileInput" accept=".json,application/json" hidden>
     <input type="file" id="xlsInput" accept=".xlsx,.xlsm,.xls,.csv,.htm,.html,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" hidden>
+    <input type="file" id="balInput" accept=".xlsx,.xlsm,.xls,.csv,.htm,.html,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" hidden>
   </div>
 
   <div class="tablewrap"><table id="grid"></table></div>
@@ -218,6 +244,19 @@ td.cum.neg{color:var(--red);}
   </div>
 </div>
 <div class="toast" id="toast"></div>
+
+<div class="mask" id="balMask">
+  <div class="dlg" role="dialog" aria-modal="true">
+    <div class="dlg-h" id="balHead"></div>
+    <div class="dlg-b" id="balBody"></div>
+    <div class="dlg-f">
+      <button class="left" id="balUndo" hidden title="把刚才写进去的这个月恢复原样">撤销本次导入</button>
+      <button id="balMapBtn" title="选一个「映射表.xlsx」替换当前映射（列：台账项目 / 余额表科目编码 / 余额表科目名称 / 取数口径）">更新映射表</button>
+      <button id="balResetMap" title="回到内置的默认映射">恢复默认映射</button>
+      <button id="balClose" class="primary">关闭</button>
+    </div>
+  </div>
+</div>
 
 <script>
 (function(){
@@ -261,6 +300,26 @@ const FIXED = {
   preCity: {id:"preCity",  kind:"preCity",   name:"预缴房产城建税"},
   total:   {id:"total",    kind:"total",     name:"税金合计"}
 };
+/* ---------- 科目余额表 → 台账项目 的默认映射 ----------
+   对应桌面「映射表.xlsx」的四列：台账项目 / 余额表科目编码 / 余额表科目名称 / 取数口径（余额表列）。
+   成本类科目的发生额在借方（贷方只有结转），所以「主营业务成本」取借方；
+   其余收入类取贷方、进项税取借方、计提类税费取贷方。用户可以用「导入余额表」直接选自己的映射表替换。 */
+const DEF_MAP = [
+  {item:"货物收入",       code:"500104",   name:"内销商品收入",       col:"本期发生额·贷方"},
+  {item:"服务收入",       code:"500103",   name:"服务收入",           col:"本期发生额·贷方"},
+  {item:"主营业务成本",   code:"5401",     name:"主营业务成本",       col:"本期发生额·借方"},
+  {item:"销项税",         code:"22210105", name:"销项税额",           col:"本期发生额·贷方"},
+  {item:"进项税",         code:"22210101", name:"进项税额",           col:"本期发生额·借方"},
+  {item:"预缴房产增值税", code:"222122",   name:"预交增值税",         col:"本期发生额·贷方"},
+  {item:"增值税",         code:"222102",   name:"未交增值税",         col:"本期发生额·贷方"},
+  {item:"城市维护建设税", code:"222107",   name:"应交城市维护建设税", col:"本期发生额·贷方"},
+  {item:"教育费附加",     code:"222109",   name:"应交教育费附加",     col:"本期发生额·贷方"},
+  {item:"地方教育附加",   code:"222110",   name:"应交地方教育费附加", col:"本期发生额·贷方"},
+  {item:"印花税",         code:"222104",   name:"应交印花税",         col:"本期发生额·贷方"},
+  {item:"企业所得税",     code:"222103",   name:"应交所得税",         col:"本期发生额·贷方"},
+  {item:"房产税",         code:"222113",   name:"应交房产税",         col:"本期发生额·贷方"}
+];
+const mapRows = () => (Array.isArray(S.mapRows) && S.mapRows.length) ? S.mapRows : DEF_MAP;
 const KINDS = ["income","vatRate","input"];
 const OV = id => id + "Override";
 const isEdit = r => r.kind === "income" || r.kind === "input" || r.kind === "inputTax" ||
@@ -283,6 +342,7 @@ const defaults = () => ({
   halve:true, theme:"light",
   rows:DEF_ROWS.map(r=>Object.assign({}, r)),
   seq:1,
+  mapRows:null,          // 自定义映射（导入映射表后才有），null = 用内置 DEF_MAP
   months:Array.from({length:N}, blank)
 });
 
@@ -2067,38 +2127,324 @@ function impMsg(r){
   }
   return p.length ? "，" + p.join("，") : "";
 }
-async function importExcel(file){  const name = file.name.toLowerCase();
-  try{
-    if(name.endsWith(".csv")){
-      const text = await file.text();
-      const matrix = text.split(/\r?\n/).filter(l=>l.trim()).map(l=>l.split(","));
-      const r = applyMatrix(matrix, file.name);
-      toast("已导入 CSV" + impMsg(r));
-      return;
-    }
-    if(name.endsWith(".xlsx") || name.endsWith(".xlsm")){
-      const files = await unzip(await file.arrayBuffer());
-      const sheetKey = Object.keys(files).filter(k=>/^xl\/worksheets\/sheet\d+\.xml$/.test(k)).sort()[0];
-      if(!sheetKey) throw new Error("xlsx 里找不到工作表");
-      const dec = new TextDecoder();
-      const shared = files["xl/sharedStrings.xml"] ? parseShared(dec.decode(files["xl/sharedStrings.xml"])) : [];
-      const matrix = sheetToMatrix(dec.decode(files[sheetKey]), shared);
-      const r = applyMatrix(matrix, file.name);
-      toast("已导入 " + file.name + impMsg(r));
-      return;
-    }
-    // .xls / .htm —— 多数是 HTML 表格
+/* 把 csv / xlsx / html 表格统一读成二维数组 */
+async function readMatrix(file){
+  const name = file.name.toLowerCase();
+  if(name.endsWith(".csv")){
     const text = await file.text();
-    if(/<table/i.test(text)){
-      const r = applyMatrix(htmlTableToMatrix(text), file.name);
-      toast("已导入 " + file.name + impMsg(r));
-    }else{
-      throw new Error("这个 .xls 不是网页表格格式，请先用 Excel 另存为 .xlsx 再导入");
-    }
+    return text.split(/\r?\n/).filter(l=>l.trim()).map(l=>l.split(","));
+  }
+  if(name.endsWith(".xlsx") || name.endsWith(".xlsm")){
+    const files = await unzip(await file.arrayBuffer());
+    const sheetKey = Object.keys(files).filter(k=>/^xl\/worksheets\/sheet\d+\.xml$/.test(k)).sort()[0];
+    if(!sheetKey) throw new Error("xlsx 里找不到工作表");
+    const dec = new TextDecoder();
+    const shared = files["xl/sharedStrings.xml"] ? parseShared(dec.decode(files["xl/sharedStrings.xml"])) : [];
+    return sheetToMatrix(dec.decode(files[sheetKey]), shared);
+  }
+  // .xls / .htm —— 多数是 HTML 表格
+  const text = await file.text();
+  if(/<table/i.test(text)) return htmlTableToMatrix(text);
+  throw new Error("这个 .xls 不是网页表格格式，请先用 Excel 另存为 .xlsx 再导入");
+}
+async function importExcel(file){
+  try{
+    const matrix = await readMatrix(file);
+    const r = applyMatrix(matrix, file.name);
+    toast("已导入 " + file.name + impMsg(r));
   }catch(err){
     alert("导入失败：" + err.message);
   }
 }
+
+/* ================= 科目余额表导入 =================
+   「导入余额表」读金蝶/用友导出的科目余额表，按映射表把「本期发生额」写进文件标注的那个月份，
+   其它 11 个月一格都不碰。映射默认用 DEF_MAP，也可以直接选「映射表.xlsx」替换。
+   布局识别全按表头文字走（科目编码 / 科目名称 / 期初余额 / 本期发生额 / 本年累计发生额 / 期末余额
+   × 借方 / 贷方），不依赖固定列号，所以带不带辅助核算、有没有合并表头都能对上。 */
+const keyOf = s => String(s == null ? "" : s).replace(/[\s\u3000]/g, "");
+/* 会计数字：千分位、￥、括号负数 → 数字；空格 / - / — 一律当「没数」，跟 0 区分开 */
+function cellNum(v){
+  let t = keyOf(v).replace(/[,，￥¥]/g, "");
+  if(t === "" || t === "-" || t === "—" || t === "–" || t === "/" || t === "——") return null;
+  const neg = /^\(.*\)$/.test(t) || /^[-−]/.test(t);
+  t = t.replace(/^\((.*)\)$/, "$1").replace(/^[-−]/, "");
+  const n = parseFloat(t);
+  if(!isFinite(n)) return null;
+  return neg ? -n : n;
+}
+/* 期间：先看表头「2026年10月」，再退回文件名「…_2026-10_…」 */
+function balPeriod(matrix, fileName){
+  const texts = [];
+  for(let i=0;i<Math.min(matrix.length, 8);i++){
+    (matrix[i]||[]).forEach(c=>{ const t = String(c==null?"":c).trim(); if(t) texts.push(t); });
+  }
+  texts.push(String(fileName || ""));
+  for(const tx of texts){
+    const s = keyOf(tx);
+    let m = s.match(/((?:19|20)\d{2})年(\d{1,2})月/);
+    if(!m) m = s.match(/((?:19|20)\d{2})[-_./年](\d{1,2})(?!\d)/);
+    if(m){
+      const y = +m[1], mo = +m[2];
+      if(y >= 2000 && y <= 2100 && mo >= 1 && mo <= 12) return {year:y, month:mo, from:tx};
+    }
+  }
+  return {year:0, month:0, from:""};
+}
+function balCompany(matrix, fileName){
+  for(let i=0;i<Math.min(matrix.length, 8);i++){
+    for(const c of (matrix[i]||[])){
+      const s = String(c==null?"":c).trim();
+      const m = s.match(/核算单位[:：]\s*(.+)$/);
+      if(m) return m[1].replace(/\s+/g,"").slice(0,30);
+    }
+  }
+  const stem = String(fileName || "").replace(/\.[^.]+$/, "");
+  const m = stem.match(/科目余额表[_-]([^_-]+)/);
+  return m ? m[1].trim().slice(0,30) : "";
+}
+/* 表头解析：返回每一列所属分组（期初余额 / 本期发生额 / 本年累计发生额 / 期末余额）和借/贷 */
+function balCols(matrix){
+  let h = -1;
+  for(let i=0;i<Math.min(matrix.length, 25);i++){
+    const row = (matrix[i]||[]).map(keyOf);
+    if(row.some(c=>/科目编码|科目代码|科目编号/.test(c)) && row.some(c=>/科目名称/.test(c))){ h = i; break; }
+  }
+  if(h < 0) return null;
+  const head = (matrix[h]||[]).map(keyOf);
+  const sub  = (matrix[h+1]||[]).map(keyOf);
+  /* 两层表头：分组名一行 + 借/贷一行；一层表头：写成「本期发生额借方」 */
+  const two  = sub.some(c=>/^借方?$/.test(c)) && sub.some(c=>/^贷方?$/.test(c));
+  const cols = Math.max(head.length, sub.length);
+  const grp = []; let cur = "";
+  for(let c=0;c<cols;c++){ if(head[c]) cur = head[c]; grp[c] = cur; }
+  const info = [];
+  for(let c=0;c<cols;c++){
+    let side = "";
+    if(two){
+      const s = sub[c] || "";
+      if(/^借方?$/.test(s)) side = "D";
+      else if(/^贷方?$/.test(s)) side = "C";
+    }else{
+      const g = head[c] || "";
+      if(/借方/.test(g)) side = "D";
+      else if(/贷方/.test(g)) side = "C";
+    }
+    const group = keyOf(grp[c] || "").replace(/借方|贷方/g,"").replace(/[（(].*?[)）]/g,"");
+    info.push({c, group, side});
+  }
+  return {h, cols, two, info, dataStart: two ? h+2 : h+1};
+}
+/* 「本期发生额·贷方」→ 列号。组名按语义挑，避免「本年累计发生额」被「发生额」误命中 */
+const BAL_GROUP_TESTS = [
+  {k:/本年|累计/,  t:g=>/本年|累计/.test(g)},
+  {k:/本期|本月|当月|当期|发生额/, t:g=>(/本期|本月|当月|当期|发生额/.test(g)) && !/本年|累计/.test(g)},
+  {k:/期初/, t:g=>/期初/.test(g)},
+  {k:/期末/, t:g=>/期末/.test(g)}
+];
+function balPickCol(cols, spec){
+  const s = keyOf(spec);
+  const side = /借/.test(s) ? "D" : /贷/.test(s) ? "C" : "";
+  const want = s.replace(/借方|贷方/g,"").replace(/[·•.。\/、_—－\s]/g,"");
+  const test = (BAL_GROUP_TESTS.find(g=>g.k.test(want)) || {t:g=>g.includes(want) || want.includes(g)}).t;
+  const same = cols.info.filter(ci=>ci.side && test(ci.group));
+  let hit = side ? same.find(ci=>ci.side === side) : same[0];
+  if(!hit && side){                      // 该组没有分借贷的单列
+    const any = cols.info.filter(ci=>!ci.side && test(ci.group));
+    if(any.length) hit = any[0];
+  }
+  if(!hit) return null;
+  const other = same.find(ci=>ci.side && ci.side !== hit.side) || null;
+  return {c: hit.c, side: (hit.side || side || ""), other: other ? other.c : -1,
+          label: (hit.group || "") + (hit.side === "D" ? "·借方" : hit.side === "C" ? "·贷方" : "")};
+}
+function balIndex(matrix, cols){
+  const byCode = {}, codes = [];
+  for(let i=cols.dataStart;i<matrix.length;i++){
+    const row = matrix[i] || [];
+    const code = keyOf(row[0]), name = keyOf(row[1]);
+    if(!code || /^(合计|小计|总计)/.test(name)) continue;
+    byCode[code] = row; codes.push(code);
+  }
+  return {byCode, codes};
+}
+/* 台账项目 → 落点。先按 LABELS 认固定行/老行，再按名字找，实在没有就建一行（收入类建收入项，其余建手工税费） */
+function balTarget(item){
+  const label = keyOf(item);
+  const f = labelId(label);
+  if(f && FIXED[f]) return {fixed:f};
+  if(f){
+    let r = S.rows.find(x=>x.id === f) || S.rows.find(x=>keyOf(x.name) === label) || findRowByLabel(label, f);
+    if(!r){
+      const d = DEF_ROWS.find(x=>x.id === f);
+      if(d){ r = Object.assign({}, d); S.rows.push(r); return {row:r, created:r.name}; }
+    }
+    if(r) return {row:r};
+  }
+  let r = S.rows.find(x=>keyOf(x.name) === label) || findRowByLabel(label, "");
+  if(r) return {row:r};
+  const income = /收入/.test(label);
+  r = income ? {id:newRowId(), kind:"income", name:label, rate:guessIncomeRate(label)}
+             : {id:newRowId(), kind:"input",  name:label};
+  S.rows.push(r);
+  return {row:r, created:r.name};
+}
+function balPut(m, t, v){
+  if(t.fixed){
+    const k = t.fixed;
+    if(k === "output" || k === "vat" || k === "preCity" || k === "carryIn"){ m[OV(k)] = String(r2(v)); return OV(k); }
+    if(k === "cost" || k === "preVat" || k === "inputTax"){ m[k] = String(r2(v)); return k; }
+    return null;                       // 收入合计/毛利/毛利率/税金合计/期末留抵 不收直接写入
+  }
+  const r = t.row;
+  if(r.kind === "vatRate"){ m[OV(r.id)] = String(r2(v)); return OV(r.id); }
+  m[r.id] = String(r2(v));
+  return r.id;
+}
+function applyBalance(matrix, fileName, mapList){
+  const per = balPeriod(matrix, fileName);
+  if(!per.month) throw new Error("没认出所属年月 —— 表头或文件名里要有「2026年10月」或「2026-10」");
+  const cols = balCols(matrix);
+  if(!cols) throw new Error("没找到「科目编码 / 科目名称」表头，这不像是科目余额表");
+  const {byCode, codes} = balIndex(matrix, cols);
+  if(!codes.length) throw new Error("余额表里没有数据行");
+
+  const mi = per.month - 1;
+  const before = JSON.stringify(S.months[mi]);
+  const m = S.months[mi];
+  const lines = [], miss = [], createdIds = [];
+
+  mapList.forEach(it=>{
+    const item = keyOf(it.item), code = keyOf(it.code), wantName = keyOf(it.name);
+    if(!item) return;
+    let row = byCode[code], usedCode = code;
+    if(!row && wantName){                            // 科目编码对不上就按科目名称找一次
+      const alt = codes.find(c=>keyOf((byCode[c]||[])[1]) === wantName);
+      if(alt){ row = byCode[alt]; usedCode = alt; }
+    }
+    if(!row){ miss.push(item + "（科目 " + code + (wantName ? " " + wantName : "") + " 在余额表里没找到）"); return; }
+    const pick = balPickCol(cols, it.col);
+    if(!pick){ miss.push(item + "（取数口径「" + it.col + "」对不上余额表的列）"); return; }
+
+    let v = cellNum(row[pick.c]);
+    let note = "", fell = "";
+    /* 映射那一侧本期为空 → 取对方（成本/税费的计提没做、只记了缴纳时很有用）。
+       但增值税/销项/进项/预缴 这几个是单向的「应交数」，借方的缴纳额不等于应纳额，绝不回退。 */
+    const fid = labelId(item);
+    const noFb = fid === "vat" || fid === "output" || fid === "inputTax" ||
+                 fid === "preVat" || fid === "carryIn" || fid === "carryOut";
+    if(v === null && pick.other >= 0 && !noFb){
+      const v2 = cellNum(row[pick.other]);
+      if(v2 !== null && Math.abs(v2) > 0.004){
+        v = v2;
+        fell = pick.side === "C" ? "借方" : "贷方";
+        note = "口径回退：本期" + (pick.side === "C" ? "贷方" : "借方") + "为空，改取" + fell;
+      }
+    }
+    const acct = usedCode + " " + (wantName || keyOf(row[1]) || "");
+    if(v === null || Math.abs(v) < 0.005){
+      lines.push({item, acct, col: pick.label, v: 0, skip: true, note: "本期无发生额，未写入", ovKey: ""});
+      return;
+    }
+    const t = balTarget(item);
+    /* 收入项回退到「借」侧＝冲减（退货/红字），取负号；成本、税费回退到借侧是正常发生额，保持正数 */
+    const isIncome = !t.fixed && t.row.kind === "income";
+    if(fell && isIncome && fell === "借方") v = -v;
+    const k = balPut(m, t, v);
+    if(!k){ miss.push(item + "（这一项不能直接填数）"); return; }
+    if(t.created){ createdIds.push(t.row.id); note = (note ? note + "；" : "") + "新建行「" + t.created + "」"; }
+    lines.push({item, acct, col: pick.label, v: r2(v), note, ovKey: k.indexOf("Override") > 0 ? k : ""});
+  });
+
+  /* 写进去的数跟自动算的一致就回归自动，不留下无意义的手改标记 */
+  let ser = calcSeries();
+  if(has(m[OV("output")]) && Math.abs(num(m[OV("output")]) - num(ser[mi].auto.output)) <= 0.005) delete m[OV("output")];
+  ser = calcSeries();
+  normalizeVat(m, ser[mi].carryInAuto);
+  ser = calcSeries();
+  S.rows.filter(r=>r.kind === "vatRate").forEach(r=>{
+    if(has(m[OV(r.id)]) && Math.abs(num(m[OV(r.id)]) - num(ser[mi].auto[r.id])) <= 0.005) delete m[OV(r.id)];
+  });
+  normalizePreCity(m);
+
+  lines.forEach(l=>{ if(l.ovKey) l.manual = has(m[l.ovKey]); });
+
+  /* 视图跟着文件走：年度按月对齐，选中那个月，其它月不动 */
+  if(per.year && per.year !== S.year) S.year = per.year;
+  const co = balCompany(matrix, fileName);
+  if(co && !S.company) S.company = co;
+  sel = mi; collapse = false;
+
+  return {per, mi, before, lines, miss, createdIds, company: co,
+          mapCount: mapList.length, mapCustom: Array.isArray(S.mapRows) && S.mapRows.length > 0,
+          wrote: lines.filter(l=>!l.skip).length};
+}
+/* 「映射表.xlsx」：表头含 台账项目 + 余额表科目编码 就当成映射表 */
+function parseMapSheet(matrix){
+  let h = -1;
+  for(let i=0;i<Math.min(matrix.length, 15);i++){
+    const row = (matrix[i]||[]).map(keyOf);
+    if(row.some(c=>/台账项目/.test(c)) && row.some(c=>/余额表科目|科目编码|科目代码/.test(c))){ h = i; break; }
+  }
+  if(h < 0) return null;
+  const head = (matrix[h]||[]).map(keyOf);
+  const idx = {
+    item: head.findIndex(c=>/台账项目/.test(c)),
+    code: head.findIndex(c=>/余额表科目|科目编码|科目代码/.test(c)),
+    name: head.findIndex(c=>/科目名称/.test(c)),
+    col:  head.findIndex(c=>/取数口径|口径|余额表列/.test(c))
+  };
+  if(idx.item < 0 || idx.code < 0) return null;
+  const out = [];
+  for(let i=h+1;i<matrix.length;i++){
+    const row = matrix[i] || [];
+    const item = keyOf(row[idx.item]), code = keyOf(row[idx.code]);
+    if(!item || !code) continue;
+    out.push({item, code,
+              name: idx.name >= 0 ? keyOf(row[idx.name]) : "",
+              col:  idx.col  >= 0 ? keyOf(row[idx.col])  : "本期发生额·贷方"});
+  }
+  return out.length ? out : null;
+}
+let balUndoState = null;
+async function importBalance(file){
+  try{
+    const matrix = await readMatrix(file);
+    const asMap = parseMapSheet(matrix);
+    if(asMap){
+      S.mapRows = asMap; save();
+      toast("映射表已更新：" + asMap.length + " 项，下次导入余额表按新映射取数");
+      return;
+    }
+    const r = applyBalance(matrix, file.name, mapRows());
+    showBalReport(r);
+    balUndoState = {mi:r.mi, before:r.before, createdIds:r.createdIds};
+    buildGrid(); syncControls(); paint(); save();
+  }catch(err){
+    alert("余额表导入失败：" + err.message);
+  }
+}
+function showBalReport(r){
+  $("balHead").innerHTML = "余额表导入 · " + r.per.year + " 年 " + r.per.month + " 月" +
+    '<span class="muted">' + (r.company ? "核算单位 " + esc(r.company) + " · " : "") +
+    "只写 " + r.per.month + " 月这一列，其它月份未改动 · 映射 " + r.mapCount + " 项" +
+    (r.mapCustom ? "（自定义）" : "（内置）") + "</span>";
+  const rows = r.lines.map(l=>
+    "<tr><td>" + esc(l.item) + "</td><td>" + esc(l.acct) + "</td><td>" + esc(l.col) + "</td>" +
+    '<td class="num">' + (l.skip ? "—" : fmt(l.v)) + "</td>" +
+    '<td class="note' + (l.skip ? "" : l.note.indexOf("口径回退") === 0 ? " fb" : "") + '">' +
+    esc(l.note || (l.manual ? "手改值" : "自动命中")) + "</td></tr>").join("");
+  const missHtml = r.miss.length
+    ? '<div class="tip" style="color:var(--red)">没取到数：' + r.miss.map(esc).join("；") + "</div>" : "";
+  $("balBody").innerHTML =
+    "<table><thead><tr><th>台账项目</th><th>余额表科目</th><th>取数口径</th><th>金额</th><th>说明</th></tr></thead>" +
+    "<tbody>" + rows + "</tbody></table>" + missHtml +
+    '<div class="tip">写入 ' + r.wrote + " 项。带「口径回退」的是映射那一列本期为空、改取对方借/贷方；" +
+    "金额不对就到映射表里改「取数口径」再导一次。</div>";
+  $("balUndo").hidden = false;
+  $("balMask").classList.add("on");
+}
+function hideBal(){ $("balMask").classList.remove("on"); }
 
 /* ---------- 事件 ---------- */
 $("company").addEventListener("input", e=>{
@@ -2128,6 +2474,47 @@ $("xlsInput").addEventListener("change", e=>{
   const f = e.target.files && e.target.files[0];
   if(f) importExcel(f);
   e.target.value = "";
+});
+/* 余额表：同一个按钮既认科目余额表，也认映射表（靠表头判断） */
+$("btnBalance").addEventListener("click", async ()=>{
+  const f = await pickFile("excel");
+  if(f === undefined){ $("balInput").click(); return; }
+  if(f) importBalance(f);
+});
+$("balInput").addEventListener("change", e=>{
+  const f = e.target.files && e.target.files[0];
+  if(f) importBalance(f);
+  e.target.value = "";
+});
+$("balClose").addEventListener("click", hideBal);
+$("balMask").addEventListener("click", e=>{ if(e.target === $("balMask")) hideBal(); });
+$("balMapBtn").addEventListener("click", async ()=>{
+  const f = await pickFile("excel");
+  if(f === undefined){ $("balInput").click(); return; }
+  if(!f) return;
+  try{
+    const asMap = parseMapSheet(await readMatrix(f));
+    if(!asMap) throw new Error("表头里没找到「台账项目 / 余额表科目编码」");
+    S.mapRows = asMap; save();
+    toast("映射表已换成 " + f.name + "（" + asMap.length + " 项）");
+  }catch(err){ alert("映射表读取失败：" + err.message); }
+});
+$("balResetMap").addEventListener("click", ()=>{
+  S.mapRows = null; save();
+  toast("已恢复内置映射（" + DEF_MAP.length + " 项）");
+});
+$("balUndo").addEventListener("click", ()=>{
+  if(!balUndoState) return;
+  const {mi, before, createdIds} = balUndoState;
+  S.months[mi] = JSON.parse(before);
+  if(createdIds.length){
+    S.rows = S.rows.filter(r=>createdIds.indexOf(r.id) < 0);
+    if(Array.isArray(S.order)) S.order = S.order.filter(id=>createdIds.indexOf(id) < 0);
+  }
+  balUndoState = null;
+  $("balUndo").hidden = true;
+  buildGrid(); syncControls(); paint(); save();
+  toast("已撤销，" + (mi + 1) + " 月回到导入前的样子");
 });
 $("btnSave").addEventListener("click", async ()=>{
   const name = "税金台账存档_" + S.year + ".json";
