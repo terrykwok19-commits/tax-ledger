@@ -250,10 +250,12 @@ td.cum.neg{color:var(--red);}
     <div class="dlg-h" id="balHead"></div>
     <div class="dlg-b" id="balBody"></div>
     <div class="dlg-f">
-      <button class="left" id="balUndo" hidden title="把刚才写进去的这个月恢复原样">撤销本次导入</button>
+      <button class="left" id="balUndo" hidden title="把这个月恢复到写入前的样子">撤销本次写入</button>
       <button id="balMapBtn" title="选一个「映射表.xlsx」替换当前映射（列：台账项目 / 余额表科目编码 / 余额表科目名称 / 取数口径）">更新映射表</button>
       <button id="balResetMap" title="回到内置的默认映射">恢复默认映射</button>
-      <button id="balClose" class="primary">关闭</button>
+      <button id="balCancel" hidden title="什么都不改，关掉预览">取消</button>
+      <button id="balOk" class="primary" hidden title="按上面这个表写入台账">确认写入</button>
+      <button id="balClose" class="primary" hidden>关闭</button>
     </div>
   </div>
 </div>
@@ -2269,7 +2271,7 @@ function balIndex(matrix, cols){
   return {byCode, codes};
 }
 /* 台账项目 → 落点。先按 LABELS 认固定行/老行，再按名字找，实在没有就建一行（收入类建收入项，其余建手工税费） */
-function balTarget(item){
+function balTarget(item, dry){
   const label = keyOf(item);
   const f = labelId(label);
   if(f && FIXED[f]) return {fixed:f};
@@ -2277,31 +2279,41 @@ function balTarget(item){
     let r = S.rows.find(x=>x.id === f) || S.rows.find(x=>keyOf(x.name) === label) || findRowByLabel(label, f);
     if(!r){
       const d = DEF_ROWS.find(x=>x.id === f);
-      if(d){ r = Object.assign({}, d); S.rows.push(r); return {row:r, created:r.name}; }
+      if(d){
+        if(dry) return {row:Object.assign({}, d), created:d.name, dry:true};   // 预览：只说要建，不真建
+        r = Object.assign({}, d); S.rows.push(r); return {row:r, created:r.name};
+      }
     }
     if(r) return {row:r};
   }
   let r = S.rows.find(x=>keyOf(x.name) === label) || findRowByLabel(label, "");
   if(r) return {row:r};
   const income = /收入/.test(label);
+  if(dry) return {row:{id:"__dry__", kind: income ? "income" : "input", name:label, rate:guessIncomeRate(label)},
+                  created:label, dry:true};
   r = income ? {id:newRowId(), kind:"income", name:label, rate:guessIncomeRate(label)}
              : {id:newRowId(), kind:"input",  name:label};
   S.rows.push(r);
   return {row:r, created:r.name};
 }
-function balPut(m, t, v){
+/* 这一项写到哪一格；不能直接写数的（收入合计 / 毛利 / 税金合计 / 期末留抵）返回 null */
+function balPutKey(t){
   if(t.fixed){
     const k = t.fixed;
-    if(k === "output" || k === "vat" || k === "preCity" || k === "carryIn"){ m[OV(k)] = String(r2(v)); return OV(k); }
-    if(k === "cost" || k === "preVat" || k === "inputTax"){ m[k] = String(r2(v)); return k; }
-    return null;                       // 收入合计/毛利/毛利率/税金合计/期末留抵 不收直接写入
+    if(k === "output" || k === "vat" || k === "preCity" || k === "carryIn") return OV(k);
+    if(k === "cost" || k === "preVat" || k === "inputTax") return k;
+    return null;
   }
-  const r = t.row;
-  if(r.kind === "vatRate"){ m[OV(r.id)] = String(r2(v)); return OV(r.id); }
-  m[r.id] = String(r2(v));
-  return r.id;
+  return t.row.kind === "vatRate" ? OV(t.row.id) : t.row.id;
 }
-function applyBalance(matrix, fileName, mapList){
+function balPut(m, t, v){
+  const k = balPutKey(t);
+  if(!k) return null;
+  m[k] = String(r2(v));
+  return k;
+}
+/* 第一遍：只算「打算写什么」，一格都不改台账（给预览弹窗用） */
+function planBalance(matrix, fileName, mapList){
   const per = balPeriod(matrix, fileName);
   if(!per.month) throw new Error("没认出所属年月 —— 表头或文件名里要有「2026年10月」或「2026-10」");
   const cols = balCols(matrix);
@@ -2310,9 +2322,7 @@ function applyBalance(matrix, fileName, mapList){
   if(!codes.length) throw new Error("余额表里没有数据行");
 
   const mi = per.month - 1;
-  const before = JSON.stringify(S.months[mi]);
-  const m = S.months[mi];
-  const lines = [], miss = [], createdIds = [];
+  const lines = [], miss = [];
 
   mapList.forEach(it=>{
     const item = keyOf(it.item), code = keyOf(it.code), wantName = keyOf(it.name);
@@ -2329,7 +2339,6 @@ function applyBalance(matrix, fileName, mapList){
     /* 严格按映射口径的那一列取数：本期发生额为空就说明这个月没发生，不取值、也不改取对方方向。
        要看借方/贷方就改映射表里的「取数口径」。 */
     const raw = cellNum(row[pick.c]);
-    let note = "";
     const acct = usedCode + " " + (wantName || keyOf(row[1]) || "");
     if(raw === null){
       /* 只是提示一下对面有数，便于发现映射口径写反了；提示归提示，不取值 */
@@ -2346,15 +2355,34 @@ function applyBalance(matrix, fileName, mapList){
       lines.push({item, acct, col: pick.label, v: 0, skip: true, note: "本期发生额为 0，未取值", ovKey: ""});
       return;
     }
-    const t = balTarget(item);
+    const t = balTarget(item, true);                 // dry：只判断落到哪一行，不建行
+    if(!balPutKey(t)){ miss.push(item + "（这一项不能直接填数）"); return; }
     /* 收入项按「借方」口径取到的是冲减（退货/红字），取负号；成本、税费按借侧是正常发生额，保持正数 */
     const isIncome = !t.fixed && t.row.kind === "income";
     const v = (isIncome && pick.side === "D") ? -raw : raw;
-    if(isIncome && pick.side === "D") note = "按借方口径取数，作冲减";
-    const k = balPut(m, t, v);
-    if(!k){ miss.push(item + "（这一项不能直接填数）"); return; }
-    if(t.created){ createdIds.push(t.row.id); note = (note ? note + "；" : "") + "新建行「" + t.created + "」"; }
-    lines.push({item, acct, col: pick.label, v: r2(v), note, ovKey: k.indexOf("Override") > 0 ? k : ""});
+    let note = (isIncome && pick.side === "D") ? "按借方口径取数，作冲减" : "";
+    if(t.created) note = (note ? note + "；" : "") + "新建行「" + t.created + "」";
+    lines.push({item, acct, col: pick.label, v: r2(v), note, ovKey: ""});
+  });
+
+  return {per, mi, lines, miss,
+          company: balCompany(matrix, fileName),
+          mapCount: mapList.length, mapCustom: Array.isArray(S.mapRows) && S.mapRows.length > 0,
+          wrote: lines.filter(l=>!l.skip).length};
+}
+/* 第二遍：用户点「确认写入」后，才真按 plan 改台账 */
+function applyBalance(plan){
+  const mi = plan.mi, m = S.months[mi];
+  const before = JSON.stringify(m);
+  const createdIds = [];
+
+  plan.lines.forEach(l=>{
+    if(l.skip) return;
+    const t = balTarget(l.item);                     // 这次是真建行
+    const k = balPut(m, t, l.v);
+    if(!k){ l.skip = true; l.note = "这一项不能直接填数"; return; }
+    if(t.created) createdIds.push(t.row.id);
+    l.ovKey = k.indexOf("Override") > 0 ? k : "";
   });
 
   /* 写进去的数跟自动算的一致就回归自动，不留下无意义的手改标记 */
@@ -2368,17 +2396,15 @@ function applyBalance(matrix, fileName, mapList){
   });
   normalizePreCity(m);
 
-  lines.forEach(l=>{ if(l.ovKey) l.manual = has(m[l.ovKey]); });
+  plan.lines.forEach(l=>{ l.manual = l.ovKey ? has(m[l.ovKey]) : false; });
+  plan.wrote = plan.lines.filter(l=>!l.skip).length;
 
   /* 视图跟着文件走：年度按月对齐，选中那个月，其它月不动 */
-  if(per.year && per.year !== S.year) S.year = per.year;
-  const co = balCompany(matrix, fileName);
-  if(co && !S.company) S.company = co;
+  if(plan.per.year && plan.per.year !== S.year) S.year = plan.per.year;
+  if(plan.company && !S.company) S.company = plan.company;
   sel = mi; collapse = false;
 
-  return {per, mi, before, lines, miss, createdIds, company: co,
-          mapCount: mapList.length, mapCustom: Array.isArray(S.mapRows) && S.mapRows.length > 0,
-          wrote: lines.filter(l=>!l.skip).length};
+  return {before, createdIds};
 }
 /* 「映射表.xlsx」：表头含 台账项目 + 余额表科目编码 就当成映射表 */
 function parseMapSheet(matrix){
@@ -2408,6 +2434,7 @@ function parseMapSheet(matrix){
   return out.length ? out : null;
 }
 let balUndoState = null;
+let balPending = null;                 // 等着确认的导入：{matrix, fileName, mapList, plan}
 async function importBalance(file){
   try{
     const matrix = await readMatrix(file);
@@ -2417,38 +2444,82 @@ async function importBalance(file){
       toast("映射表已更新：" + asMap.length + " 项，下次导入余额表按新映射取数");
       return;
     }
-    const r = applyBalance(matrix, file.name, mapRows());
-    showBalReport(r);
-    balUndoState = {mi:r.mi, before:r.before, createdIds:r.createdIds};
-    buildGrid(); syncControls(); paint(); save();
+    balPending = {matrix, fileName: file.name, mapList: mapRows(), plan: null};
+    refreshBalPreview();               // 只算不写，先给预览
   }catch(err){
-    alert("余额表导入失败：" + err.message);
+    alert("余额表读取失败：" + err.message);
   }
 }
-function showBalReport(r){
-  $("balHead").innerHTML = "余额表导入 · " + r.per.year + " 年 " + r.per.month + " 月" +
-    '<span class="muted">' + (r.company ? "核算单位 " + esc(r.company) + " · " : "") +
-    "只写 " + r.per.month + " 月这一列，其它月份未改动 · 映射 " + r.mapCount + " 项" +
-    (r.mapCustom ? "（自定义）" : "（内置）") + "</span>";
+function refreshBalPreview(){
+  if(!balPending) return;
+  balPending.mapList = mapRows();
+  balPending.plan = planBalance(balPending.matrix, balPending.fileName, balPending.mapList);
+  showBalPreview(balPending.plan);
+}
+/* 确认写入：这一步才真改台账 */
+function commitBalance(){
+  if(!balPending) return;
+  const plan = balPending.plan;
+  let res;
+  try{ res = applyBalance(plan); }
+  catch(err){ alert("写入失败：" + err.message); return; }
+  balUndoState = {mi:plan.mi, before:res.before, createdIds:res.createdIds};
+  balPending = null;
+  buildGrid(); syncControls(); paint(); save();
+  showBalDone(plan);
+  toast("已写入 " + plan.wrote + " 项到 " + plan.per.month + " 月");
+}
+function balTable(r){
   const rows = r.lines.map(l=>
     "<tr><td>" + esc(l.item) + "</td><td>" + esc(l.acct) + "</td><td>" + esc(l.col) + "</td>" +
     '<td class="num">' + (l.skip ? "—" : fmt(l.v)) + "</td>" +
-    '<td class="note' + (l.skip ? "" : l.note.indexOf("口径回退") === 0 ? " fb" : "") + '">' +
+    '<td class="note' + (l.skip ? "" : l.manual ? " fb" : "") + '">' +
     esc(l.note || (l.manual ? "手改值" : "自动命中")) + "</td></tr>").join("");
   const missHtml = r.miss.length
     ? '<div class="tip" style="color:var(--red)">没取到数：' + r.miss.map(esc).join("；") + "</div>" : "";
+  return "<table><thead><tr><th>台账项目</th><th>余额表科目</th><th>取数口径</th><th>金额</th><th>说明</th></tr></thead>" +
+         "<tbody>" + rows + "</tbody></table>" + missHtml;
+}
+function balBtns(preview){
+  $("balUndo").hidden  = preview;
+  $("balCancel").hidden = !preview;
+  $("balOk").hidden     = !preview;
+  $("balClose").hidden  = preview;
+  $("balMapBtn").hidden = !preview;
+  $("balResetMap").hidden = !preview;
+}
+function showBalPreview(r){
   const skipped = r.lines.filter(l=>l.skip);
-  $("balBody").innerHTML =
-    "<table><thead><tr><th>台账项目</th><th>余额表科目</th><th>取数口径</th><th>金额</th><th>说明</th></tr></thead>" +
-    "<tbody>" + rows + "</tbody></table>" + missHtml +
-    '<div class="tip">写入 ' + r.wrote + " 项" +
+  const hasData = Object.keys(S.months[r.mi] || {}).length > 0;
+  $("balHead").innerHTML = "余额表导入预览 · " + r.per.year + " 年 " + r.per.month + " 月" +
+    '<span class="muted">' + (r.company ? "核算单位 " + esc(r.company) + " · " : "") +
+    "只写 " + r.per.month + " 月这一列，其它月份不动 · 映射 " + r.mapCount + " 项" +
+    (r.mapCustom ? "（自定义）" : "（内置）") + " · 尚未写入</span>";
+  $("balBody").innerHTML = balTable(r) +
+    (hasData ? '<div class="tip" style="color:var(--manual-bd)">注意：' + r.per.month +
+      " 月这一列原来已经有数，确认后会被本次结果覆盖（写错了可以撤销）。</div>" : "") +
+    '<div class="tip"><b>还没写进台账。</b>确认后把上面 ' + r.wrote + " 项写进 " + r.per.month + " 月" +
     (skipped.length ? "，跳过 " + skipped.length + " 项（" + skipped.map(l=>esc(l.item)).join("、") + "）" : "") +
-    "。只按映射口径那一列取「本期发生额」，那一列是空的就当这个月没发生、不取值；" +
-    "要看借方或贷方，到映射表里改「取数口径」再导一次。</div>";
-  $("balUndo").hidden = false;
+    "。只按映射口径那一列取「本期发生额」，那一列是空的就当这个月没发生、不取值；要看借方或贷方，先改「取数口径」再导一次。</div>";
+  balBtns(true);
   $("balMask").classList.add("on");
 }
-function hideBal(){ $("balMask").classList.remove("on"); }
+function showBalDone(r){
+  const skipped = r.lines.filter(l=>l.skip);
+  $("balHead").innerHTML = "已写入 · " + r.per.year + " 年 " + r.per.month + " 月" +
+    '<span class="muted">' + (r.company ? "核算单位 " + esc(r.company) + " · " : "") +
+    "写入 " + r.wrote + " 项，其它月份未改动</span>";
+  $("balBody").innerHTML = balTable(r) +
+    '<div class="tip">已写进 ' + r.per.month + " 月这一列" +
+    (skipped.length ? "，跳过 " + skipped.length + " 项（" + skipped.map(l=>esc(l.item)).join("、") + "）" : "") +
+    "。写错了点左下「撤销本次写入」就能把这个月恢复成导入前的样子。</div>";
+  balBtns(false);
+  $("balMask").classList.add("on");
+}
+function hideBal(){
+  balPending = null;
+  $("balMask").classList.remove("on");
+}
 
 /* ---------- 事件 ---------- */
 $("company").addEventListener("input", e=>{
@@ -2491,7 +2562,16 @@ $("balInput").addEventListener("change", e=>{
   e.target.value = "";
 });
 $("balClose").addEventListener("click", hideBal);
+$("balOk").addEventListener("click", commitBalance);
+$("balCancel").addEventListener("click", ()=>{
+  balPending = null; hideBal();
+  toast("已取消，台账没有改动");
+});
 $("balMask").addEventListener("click", e=>{ if(e.target === $("balMask")) hideBal(); });
+/* Esc 等同于点空白处：预览态就是取消，已写入态只是关掉弹窗 */
+document.addEventListener("keydown", e=>{
+  if(e.key === "Escape" && $("balMask").classList.contains("on")) hideBal();
+});
 $("balMapBtn").addEventListener("click", async ()=>{
   const f = await pickFile("excel");
   if(f === undefined){ $("balInput").click(); return; }
@@ -2500,12 +2580,14 @@ $("balMapBtn").addEventListener("click", async ()=>{
     const asMap = parseMapSheet(await readMatrix(f));
     if(!asMap) throw new Error("表头里没找到「台账项目 / 余额表科目编码」");
     S.mapRows = asMap; save();
-    toast("映射表已换成 " + f.name + "（" + asMap.length + " 项）");
+    toast("映射表已换成 " + f.name + "（" + asMap.length + " 项），预览已按新映射重算");
+    if(balPending) refreshBalPreview();          // 换映射后预览立刻跟着变
   }catch(err){ alert("映射表读取失败：" + err.message); }
 });
 $("balResetMap").addEventListener("click", ()=>{
   S.mapRows = null; save();
-  toast("已恢复内置映射（" + DEF_MAP.length + " 项）");
+  toast("已恢复内置映射（" + DEF_MAP.length + " 项），预览已按新映射重算");
+  if(balPending) refreshBalPreview();
 });
 $("balUndo").addEventListener("click", ()=>{
   if(!balUndoState) return;
@@ -2516,9 +2598,9 @@ $("balUndo").addEventListener("click", ()=>{
     if(Array.isArray(S.order)) S.order = S.order.filter(id=>createdIds.indexOf(id) < 0);
   }
   balUndoState = null;
-  $("balUndo").hidden = true;
+  hideBal();
   buildGrid(); syncControls(); paint(); save();
-  toast("已撤销，" + (mi + 1) + " 月回到导入前的样子");
+  toast("已撤销，" + (mi + 1) + " 月回到写入前的样子");
 });
 $("btnSave").addEventListener("click", async ()=>{
   const name = "税金台账存档_" + S.year + ".json";
