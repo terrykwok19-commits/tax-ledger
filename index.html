@@ -178,7 +178,7 @@ td.cum.neg{color:var(--red);}
   align-items:center;justify-content:center;padding:24px;}
 .mask.on{display:flex;}
 .dlg{background:var(--card);border:1px solid var(--line-strong);border-radius:14px;
-  box-shadow:var(--shadow);width:min(880px,100%);max-height:84vh;display:flex;flex-direction:column;}
+  box-shadow:var(--shadow);width:min(980px,100%);max-height:84vh;display:flex;flex-direction:column;}
 .dlg-h{padding:13px 18px;border-bottom:1px solid var(--line);font-size:14px;font-weight:600;
   display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;}
 .dlg-h .muted{font-weight:400;font-size:12px;}
@@ -2326,30 +2326,31 @@ function applyBalance(matrix, fileName, mapList){
     const pick = balPickCol(cols, it.col);
     if(!pick){ miss.push(item + "（取数口径「" + it.col + "」对不上余额表的列）"); return; }
 
-    let v = cellNum(row[pick.c]);
-    let note = "", fell = "";
-    /* 映射那一侧本期为空 → 取对方（成本/税费的计提没做、只记了缴纳时很有用）。
-       但增值税/销项/进项/预缴 这几个是单向的「应交数」，借方的缴纳额不等于应纳额，绝不回退。 */
-    const fid = labelId(item);
-    const noFb = fid === "vat" || fid === "output" || fid === "inputTax" ||
-                 fid === "preVat" || fid === "carryIn" || fid === "carryOut";
-    if(v === null && pick.other >= 0 && !noFb){
-      const v2 = cellNum(row[pick.other]);
-      if(v2 !== null && Math.abs(v2) > 0.004){
-        v = v2;
-        fell = pick.side === "C" ? "借方" : "贷方";
-        note = "口径回退：本期" + (pick.side === "C" ? "贷方" : "借方") + "为空，改取" + fell;
-      }
-    }
+    /* 严格按映射口径的那一列取数：本期发生额为空就说明这个月没发生，不取值、也不改取对方方向。
+       要看借方/贷方就改映射表里的「取数口径」。 */
+    const raw = cellNum(row[pick.c]);
+    let note = "";
     const acct = usedCode + " " + (wantName || keyOf(row[1]) || "");
-    if(v === null || Math.abs(v) < 0.005){
-      lines.push({item, acct, col: pick.label, v: 0, skip: true, note: "本期无发生额，未写入", ovKey: ""});
+    if(raw === null){
+      /* 只是提示一下对面有数，便于发现映射口径写反了；提示归提示，不取值 */
+      let hint = "";
+      if(pick.other >= 0){
+        const o = cellNum(row[pick.other]);
+        if(o !== null && Math.abs(o) >= 0.005)
+          hint = "（" + (pick.side === "C" ? "借方" : "贷方") + "有 " + fmt(Math.abs(o)) + "，要取请改口径）";
+      }
+      lines.push({item, acct, col: pick.label, v: 0, skip: true, note: "本期发生额为空，未取值" + hint, ovKey: ""});
+      return;
+    }
+    if(Math.abs(raw) < 0.005){
+      lines.push({item, acct, col: pick.label, v: 0, skip: true, note: "本期发生额为 0，未取值", ovKey: ""});
       return;
     }
     const t = balTarget(item);
-    /* 收入项回退到「借」侧＝冲减（退货/红字），取负号；成本、税费回退到借侧是正常发生额，保持正数 */
+    /* 收入项按「借方」口径取到的是冲减（退货/红字），取负号；成本、税费按借侧是正常发生额，保持正数 */
     const isIncome = !t.fixed && t.row.kind === "income";
-    if(fell && isIncome && fell === "借方") v = -v;
+    const v = (isIncome && pick.side === "D") ? -raw : raw;
+    if(isIncome && pick.side === "D") note = "按借方口径取数，作冲减";
     const k = balPut(m, t, v);
     if(!k){ miss.push(item + "（这一项不能直接填数）"); return; }
     if(t.created){ createdIds.push(t.row.id); note = (note ? note + "；" : "") + "新建行「" + t.created + "」"; }
@@ -2436,11 +2437,14 @@ function showBalReport(r){
     esc(l.note || (l.manual ? "手改值" : "自动命中")) + "</td></tr>").join("");
   const missHtml = r.miss.length
     ? '<div class="tip" style="color:var(--red)">没取到数：' + r.miss.map(esc).join("；") + "</div>" : "";
+  const skipped = r.lines.filter(l=>l.skip);
   $("balBody").innerHTML =
     "<table><thead><tr><th>台账项目</th><th>余额表科目</th><th>取数口径</th><th>金额</th><th>说明</th></tr></thead>" +
     "<tbody>" + rows + "</tbody></table>" + missHtml +
-    '<div class="tip">写入 ' + r.wrote + " 项。带「口径回退」的是映射那一列本期为空、改取对方借/贷方；" +
-    "金额不对就到映射表里改「取数口径」再导一次。</div>";
+    '<div class="tip">写入 ' + r.wrote + " 项" +
+    (skipped.length ? "，跳过 " + skipped.length + " 项（" + skipped.map(l=>esc(l.item)).join("、") + "）" : "") +
+    "。只按映射口径那一列取「本期发生额」，那一列是空的就当这个月没发生、不取值；" +
+    "要看借方或贷方，到映射表里改「取数口径」再导一次。</div>";
   $("balUndo").hidden = false;
   $("balMask").classList.add("on");
 }
