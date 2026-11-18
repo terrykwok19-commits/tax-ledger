@@ -232,6 +232,7 @@ td.cum.neg{color:var(--red);}
     <button id="btnExport" class="primary" title="默认保存到上次导出的文件夹（Chrome / Edge）">导出 Excel</button>
     <button id="btnSave" title="默认保存到上次导出的文件夹（Chrome / Edge）">导出存档</button>
     <button id="btnLoad" title="默认打开上次导入/保存的那个文件夹（Chrome / Edge）">读取存档</button>
+    <button id="btnUndoXls" disabled title="把上一次「导入 Excel」之前的台账整本还原（含项目和所有月份）">撤销导入</button>
     <button id="btnClear" class="danger">清空</button>
     <input type="file" id="fileInput" accept=".json,application/json" hidden>
     <input type="file" id="xlsInput" accept=".xlsx,.xlsm,.xls,.csv,.htm,.html,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" hidden>
@@ -260,6 +261,7 @@ td.cum.neg{color:var(--red);}
       <button id="balMapBtn" title="选一个「映射表.xlsx」替换当前映射（列：台账项目 / 适用公司 / 余额表科目编码 / 科目名称 / 取数口径 / 条件）">更新映射表</button>
       <button id="balExportMap" title="把当前生效的映射导出成 xlsx，改完再导回来就是更新">导出映射表</button>
       <button id="balResetMap" title="回到内置的默认映射">恢复默认映射</button>
+      <button id="balSyncBtn" hidden title="开：台账项目按导入表增删（映射里没有的行连行带数删掉）；关：只写数、不动项目">项目同步：开</button>
       <button id="balCancel" hidden title="什么都不改，关掉预览">取消</button>
       <button id="balOk" class="primary" hidden title="按上面这个表写入台账">确认写入</button>
       <button id="balClose" class="primary" hidden>关闭</button>
@@ -2158,6 +2160,20 @@ function applyMatrix(matrix, fileName){
     if(row) map[label] = row.id;
   });
 
+  /* 项目以导入表为准：表里没有的行（以前导入自动建的、手加的）连行带数删掉，
+     否则那些行的旧数还留在各月里，收入合计 / 税金合计就跟文件对不上 */
+  const keepIds = {};
+  Object.keys(map).forEach(k=>{ keepIds[map[k]] = 1; });
+  const delRows = S.rows.filter(r=>(r.kind === "income" || r.kind === "input" || r.kind === "vatRate") &&
+                                    !keepIds[r.id]);
+  const dropped = delRows.map(r=>r.name);
+  if(delRows.length){
+    const delIds = {};
+    delRows.forEach(r=>{ delIds[r.id] = 1; });
+    S.rows = S.rows.filter(r=>!delIds[r.id]);
+    if(Array.isArray(S.order)) S.order = S.order.filter(id=>!delIds[id]);
+  }
+
   /* 第三遍：写数。双态行先落在「手动值」上，下一遍再跟自动值比对 */
   const fresh = Array.from({length:N}, blank);
   Object.keys(picked).forEach(label=>{
@@ -2252,7 +2268,7 @@ function applyMatrix(matrix, fileName){
   if(monthIdx >= 0){ sel = monthIdx; collapse = false; }
 
   buildGrid(); syncControls(); paint(); save();
-  return {manCount, newTax: created.length, created, converted, skipped, company: companyNew,
+  return {manCount, newTax: created.length, created, converted, skipped, dropped, company: companyNew,
           year: yearNew, month: monthIdx >= 0 ? monthIdx + 1 : 0, monthFromFile: !!monthGot};
 }
 function impMsg(r){
@@ -2269,6 +2285,10 @@ function impMsg(r){
   if(r && r.converted && r.converted.length){
     const names = r.converted.slice(0,3).join("、") + (r.converted.length > 3 ? " 等" : "");
     p.push("「" + names + "」按收入项处理（税率 0）");
+  }
+  if(r && r.dropped && r.dropped.length){
+    const names = r.dropped.slice(0,3).join("、") + (r.dropped.length > 3 ? " 等" : "");
+    p.push("按文件删掉 " + r.dropped.length + " 项（" + names + "）");
   }
   if(r && r.skipped && r.skipped.length){
     p.push("跳过计算行 " + r.skipped.slice(0,2).join("、") + (r.skipped.length > 2 ? " 等" : "") +
@@ -2296,11 +2316,15 @@ async function readMatrix(file){
   if(/<table/i.test(text)) return htmlTableToMatrix(text);
   throw new Error("这个 .xls 不是网页表格格式，请先用 Excel 另存为 .xlsx 再导入");
 }
+let xlsUndo = null;                    // 「导入 Excel」前的整本快照，撤销用
 async function importExcel(file){
   try{
     const matrix = await readMatrix(file);
+    const snap = takeSnap();
     const r = applyMatrix(matrix, file.name);
-    toast("已导入 " + file.name + impMsg(r));
+    xlsUndo = snap;
+    if($("btnUndoXls")) $("btnUndoXls").disabled = false;
+    toast("已导入 " + file.name + impMsg(r) + "；导入前的版本可点「撤销导入」还原");
   }catch(err){
     alert("导入失败：" + err.message);
   }
@@ -2459,6 +2483,18 @@ function balPut(m, t, v){
   m[k] = String(r2(v));
   return k;
 }
+/* 项目同步开关：开 = 台账项目按导入表增删（映射里有就留，没有就删）；关 = 只写数不动项目 */
+let balSync = true;
+/* 台账这一行，本次映射里有没有对应项目：先按名字，再按 labelId（货物开票收入 ↔ 货物收入 → goods） */
+function mapCovers(rowName, items){
+  const nm = keyOf(rowName), id = labelId(nm);
+  for(const it of items){
+    if(keyOf(it) === nm) return true;
+    const iid = labelId(keyOf(it));
+    if(id && iid && iid === id) return true;
+  }
+  return false;
+}
 /* 第一遍：只算「打算写什么」，一格都不改台账（给预览弹窗用）
    —— 按余额表里的「核算单位 / 文件名」认公司，取这家公司该用的映射（专属 + 通用 + 兜底） */
 function planBalance(matrix, fileName){
@@ -2545,17 +2581,52 @@ function planBalance(matrix, fileName){
     usedFallback = incomeHit > before ? 1 : 0;
   }
 
-  return {per, mi, lines, miss, company,
+  /* 项目以导入表为准：台账里有、本次映射里没有的行 → 确认后连行带数删掉 */
+  const drop = [];
+  if(balSync){
+    const items = pack.rows.filter(x=>x.only !== "fallback" || usedFallback).map(x=>keyOf(x.item));
+    S.rows.forEach(r=>{
+      if(r.kind !== "income" && r.kind !== "input" && r.kind !== "vatRate") return;
+      if(FIXED[r.id]) return;
+      if(mapCovers(r.name, items)) return;
+      drop.push({id:r.id, name:r.name, kind:r.kind});
+    });
+  }
+
+  return {per, mi, lines, miss, company, drop,
           mapCount: pack.own + pack.gen, mapOwn: pack.own, mapGen: pack.gen,
           usedFallback, noCompany: !company,
           mapCustom: Array.isArray(S.mapRows) && S.mapRows.length > 0,
           wrote: lines.filter(l=>!l.skip).length};
 }
-/* 第二遍：用户点「确认写入」后，才真按 plan 改台账 */
+/* 整本台账快照：导入（余额表 / 整表）前拍一张，撤销时整本还原 */
+function takeSnap(){
+  return {rows: JSON.stringify(S.rows),
+          order: JSON.stringify(Array.isArray(S.order) ? S.order : []),
+          months: JSON.stringify(S.months),
+          seq: S.seq || 1};
+}
+function restoreSnap(sp){
+  if(!sp) return;
+  S.rows   = JSON.parse(sp.rows);
+  S.order  = JSON.parse(sp.order);
+  S.months = Array.from({length:N}, (_,i)=>Object.assign({}, (JSON.parse(sp.months) || [])[i] || {}));
+  if(sp.seq) S.seq = sp.seq;
+}
+/* 第二遍：用户点「确认写入」后，才真按 plan 改台账。
+   规则：项目按导入表增删（plan.drop 里的行连行带数删掉），数据以导入结果为准（整月清空重写） */
 function applyBalance(plan){
-  const mi = plan.mi, m = S.months[mi];
-  const before = JSON.stringify(m);
+  const mi = plan.mi;
   const createdIds = [];
+
+  (plan.drop || []).forEach(d=>{
+    S.rows = S.rows.filter(r=>r.id !== d.id);
+    if(Array.isArray(S.order)) S.order = S.order.filter(id=>id !== d.id);
+    S.months.forEach(mm=>{ delete mm[d.id]; delete mm[d.id + "Override"]; });
+  });
+
+  S.months[mi] = {};
+  const m = S.months[mi];
 
   plan.lines.forEach(l=>{
     if(l.skip) return;
@@ -2585,7 +2656,7 @@ function applyBalance(plan){
   if(plan.company && !S.company) S.company = plan.company;
   sel = mi; collapse = false;
 
-  return {before, createdIds};
+  return {createdIds};
 }
 /* 「映射表.xlsx」：表头含 台账项目 + 余额表科目编码 就当成映射表 */
 function parseMapSheet(matrix){
@@ -2648,10 +2719,10 @@ function commitBalance(){
   if(balBatch){ commitBalanceBatch(); return; }
   if(!balPending) return;
   const plan = balPending.plan;
-  let res;
-  try{ res = applyBalance(plan); }
+  const snap = takeSnap();
+  try{ applyBalance(plan); }
   catch(err){ alert("写入失败：" + err.message); return; }
-  balUndoState = {months:[{mi:plan.mi, before:res.before, createdIds:res.createdIds}]};
+  balUndoState = {snap, label: plan.per.month + " 月"};
   balPending = null;
   buildGrid(); syncControls(); paint(); save();
   showBalDone(plan);
@@ -2664,10 +2735,13 @@ function commitBalance(){
 let balBatch = null;                    // {year, company, rows:[{file, plan, why}], dupHint}
 function batchStat(){
   const ok = balBatch.rows.filter(r=>r.plan);
+  const seen = {};
+  ok.forEach(r=>(r.plan.drop || []).forEach(d=>{ seen[d.name] = 1; }));
   return {ok,
           out: balBatch.rows.filter(r=>!r.plan),
           wrote: ok.reduce((a,r)=>a + r.plan.wrote, 0),
-          months: ok.map(r=>r.plan.per.month).sort((a,b)=>a - b)};
+          months: ok.map(r=>r.plan.per.month).sort((a,b)=>a - b),
+          drop: Object.keys(seen)};
 }
 function batchTable(done){
   const rows = balBatch.rows.slice().sort((a,b)=>{
@@ -2701,9 +2775,13 @@ function showBalBatchPreview(){
     (st.out.length ? '<div class="tip" style="color:var(--red)">' + st.out.length +
       " 个文件被排除，没有写进台账（原因见「状态」列）。</div>" : "") +
     (st.ok.length
-      ? '<div class="tip"><b>还没写进台账。</b>确认后把 ' + st.wrote + " 项分别写进 " +
-        st.months.join("、") + " 月，其它月份不动；每个文件只按映射口径那一列取「本期发生额」，" +
-        "那一列空的就当这个月没发生、不取值。" + (balBatch.dupHint || "") + "</div>"
+      ? ((st.drop.length
+          ? '<div class="tip" style="color:var(--red)">项目同步会删掉 ' + st.drop.length + " 行（映射里没有它们）：<b>" +
+            st.drop.map(esc).join("、") + "</b>。删掉的行连同各月份的数一起消失；不想删就点下面「项目同步：关」。</div>" : "") +
+         '<div class="tip"><b>还没写进台账。</b>确认后把 ' + st.wrote + " 项分别写进 " +
+         st.months.join("、") + " 月（这些月份整月覆盖，导入前的旧数会清掉），其它月份不动；" +
+         "每个文件只按映射口径那一列取「本期发生额」，那一列空的就当这个月没发生、不取值。" +
+         (balBatch.dupHint || "") + "</div>")
       : '<div class="tip" style="color:var(--red)">没有可以写入的文件，换个文件或先检查文件名里的年月。</div>');
   balBtns(true);
   $("balMask").classList.add("on");
@@ -2715,7 +2793,8 @@ function showBalBatchDone(failed){
   $("balBody").innerHTML = batchTable(true) +
     (failed && failed.length
       ? '<div class="tip" style="color:var(--red)">写入失败：' + failed.map(esc).join("；") + "</div>" : "") +
-    '<div class="tip">写错了点左下「撤销本次写入」，这次涉及的 ' + st.ok.length + " 个月会一起恢复。</div>";
+    (st.drop.length ? '<div class="tip">已删除项目：' + st.drop.map(esc).join("、") + "（各月份的数一起删了）。</div>" : "") +
+    '<div class="tip">写错了点左下「撤销本次写入」，这次涉及的 ' + st.ok.length + " 个月和项目会一起恢复。</div>";
   balBtns(false);
   $("balMask").classList.add("on");
 }
@@ -2723,15 +2802,27 @@ async function importBalanceBatch(files){
   const list = Array.from(files || []);
   if(!list.length) return;
   if(list.length === 1){ importBalance(list[0]); return; }     // 只挑了一个就按老流程走
-  const rows = [];
+  const raw = [];
   for(const f of list){
-    let matrix;
-    try{ matrix = await readMatrix(f); }
-    catch(err){ rows.push({file:f.name, why:"读取失败：" + err.message}); continue; }
-    if(parseMapSheet(matrix)){ rows.push({file:f.name, why:"这是映射表文件，已跳过"}); continue; }
-    try{ rows.push({file:f.name, plan: planBalance(matrix, f.name)}); }
-    catch(err){ rows.push({file:f.name, why: err.message}); }
+    try{
+      const matrix = await readMatrix(f);
+      if(parseMapSheet(matrix)){ raw.push({file:f.name, why:"这是映射表文件，已跳过"}); continue; }
+      raw.push({file:f.name, matrix});
+    }catch(err){ raw.push({file:f.name, why:"读取失败：" + err.message}); }
   }
+  balPending = null;
+  balBatch = {raw, rows:[], year:S.year, company:S.company, dupHint:""};
+  recomputeBatch();                 // 只算不写；换「项目同步」开关时也走这里
+  showBalBatchPreview();
+}
+/* 重算整批计划（换映射 / 换项目同步开关后调用） */
+function recomputeBatch(){
+  if(!balBatch) return;
+  const rows = balBatch.raw.map(r=>{
+    if(!r.matrix) return {file:r.file, why:r.why};
+    try{ return {file:r.file, matrix:r.matrix, plan: planBalance(r.matrix, r.file)}; }
+    catch(err){ return {file:r.file, why: err.message}; }
+  });
   const ok0 = rows.filter(r=>r.plan);
   const year = ok0.length ? ok0[0].plan.per.year : S.year;
   const firstCo = (ok0.find(r=>r.plan.company) || {plan:{}}).plan.company || "";
@@ -2749,23 +2840,23 @@ async function importBalanceBatch(files){
     if(seen.has(pm.month)){ r.why = pm.month + " 月已有别的文件，只取第一份"; r.plan = null; dup++; return; }
     seen.add(pm.month);
   });
-  balPending = null;
-  balBatch = {year, company, rows,
-              dupHint: dup ? "另有 " + dup + " 个文件和别的文件撞同一个月，已排除。" : ""};
-  showBalBatchPreview();
+  balBatch.rows = rows;
+  balBatch.year = year;
+  balBatch.company = company;
+  balBatch.dupHint = dup ? "另有 " + dup + " 个文件和别的文件撞同一个月，已排除。" : "";
 }
 function commitBalanceBatch(){
   if(!balBatch) return;
   const plans = balBatch.rows.filter(r=>r.plan).map(r=>r.plan);
   if(!plans.length){ hideBal(); return; }
-  const undo = [], failed = [];
+  const snap = takeSnap();
+  const failed = [];
   plans.forEach(p=>{
-    try{
-      const res = applyBalance(p);
-      undo.push({mi:p.mi, before:res.before, createdIds:res.createdIds});
-    }catch(err){ failed.push(p.per.month + " 月：" + err.message); }
+    try{ applyBalance(p); }
+    catch(err){ failed.push(p.per.month + " 月：" + err.message); }
   });
-  balUndoState = undo.length ? {months:undo} : null;
+  const months = plans.map(p=>p.per.month).sort((a,b)=>a - b).join("、");
+  balUndoState = {snap, label: months + " 月"};
   const wrote = plans.reduce((a,p)=>a + p.wrote, 0);
   buildGrid(); syncControls(); paint(); save();
   showBalBatchDone(failed);
@@ -2794,6 +2885,9 @@ function balBtns(preview){
   $("balMapBtn").hidden    = !preview || batch;
   $("balExportMap").hidden = !preview || batch;
   $("balResetMap").hidden  = !preview || batch;
+  $("balSyncBtn").hidden   = !preview;
+  $("balSyncBtn").textContent = balSync ? "项目同步：开" : "项目同步：关";
+  $("balSyncBtn").className = balSync ? "" : "danger";
 }
 /* 映射来源说明：这家公司专属几项、通用几项、有没有走收入汇总兜底 */
 function mapNote(r){
@@ -2806,12 +2900,17 @@ function showBalPreview(r){
   const hasData = Object.keys(S.months[r.mi] || {}).length > 0;
   $("balHead").innerHTML = "余额表导入预览 · " + r.per.year + " 年 " + r.per.month + " 月" +
     '<span class="muted">' + (r.company ? "核算单位 " + esc(r.company) + " · " : "") +
-    "只写 " + r.per.month + " 月这一列，其它月份不动 · " + mapNote(r) + " · 尚未写入</span>";
-  $("balBody").innerHTML = balTable(r) +
+    "整月覆盖 " + r.per.month + " 月这一列，其它月份不动 · " + mapNote(r) + " · 尚未写入</span>";
+  const dropHtml = (r.drop && r.drop.length)
+    ? '<div class="tip" style="color:var(--red)">项目同步会删掉 ' + r.drop.length + " 行（映射里没有它们）：<b>" +
+      r.drop.map(d=>esc(d.name)).join("、") + "</b>。删掉的行连同各月份的数一起消失；" +
+      "不想删就点下面「项目同步：关」，只写数不动项目。</div>" : "";
+  $("balBody").innerHTML = balTable(r) + dropHtml +
     (r.noCompany ? '<div class="tip" style="color:var(--red)">没从余额表里认出是哪家公司（表头缺「核算单位：」、' +
       "文件名也不带公司名），只能用通用映射，收入多半取不到。</div>" : "") +
     (hasData ? '<div class="tip" style="color:var(--manual-bd)">注意：' + r.per.month +
-      " 月这一列原来已经有数，确认后会被本次结果覆盖（写错了可以撤销）。</div>" : "") +
+      " 月原来有数（" + Object.keys(S.months[r.mi] || {}).length + " 格），确认后整月清空、只留本次导入的结果" +
+      "（写错了可以撤销）。</div>" : "") +
     '<div class="tip"><b>还没写进台账。</b>确认后把上面 ' + r.wrote + " 项写进 " + r.per.month + " 月" +
     (skipped.length ? "，跳过 " + skipped.length + " 项（" + skipped.map(l=>esc(l.item)).join("、") + "）" : "") +
     "。只按映射口径那一列取「本期发生额」，那一列是空的就当这个月没发生、不取值；要看借方或贷方，先改「取数口径」再导一次。" +
@@ -2826,9 +2925,10 @@ function showBalDone(r){
     '<span class="muted">' + (r.company ? "核算单位 " + esc(r.company) + " · " : "") +
     "写入 " + r.wrote + " 项，其它月份未改动 · " + mapNote(r) + "</span>";
   $("balBody").innerHTML = balTable(r) +
-    '<div class="tip">已写进 ' + r.per.month + " 月这一列" +
+    '<div class="tip">已写进 ' + r.per.month + " 月这一列（整月覆盖，导入前这个月的旧数已清掉）" +
     (skipped.length ? "，跳过 " + skipped.length + " 项（" + skipped.map(l=>esc(l.item)).join("、") + "）" : "") +
-    "。写错了点左下「撤销本次写入」就能把这个月恢复成导入前的样子。</div>";
+    ((r.drop && r.drop.length) ? "，删除项目 " + r.drop.map(d=>esc(d.name)).join("、") : "") +
+    "。写错了点左下「撤销本次写入」就能恢复到导入前的样子。</div>";
   balBtns(false);
   $("balMask").classList.add("on");
 }
@@ -2856,6 +2956,14 @@ $("btnTheme").addEventListener("click", ()=>{
   applyTheme(); save();
 });
 $("btnExport").addEventListener("click", exportExcel);
+$("btnUndoXls").addEventListener("click", ()=>{
+  if(!xlsUndo) return;
+  restoreSnap(xlsUndo);
+  xlsUndo = null;
+  $("btnUndoXls").disabled = true;
+  buildGrid(); syncControls(); paint(); save();
+  toast("已撤销，台账恢复到上次「导入 Excel」之前的样子");
+});
 /* 导入：支持文件夹记忆的浏览器直接开选择器（定位到上次的文件夹），其余退回隐藏 input */
 $("btnImport").addEventListener("click", async ()=>{
   const f = await pickFile("excel");
@@ -2915,6 +3023,11 @@ $("mapInput").addEventListener("change", e=>{
 });
 $("balMapBtn").addEventListener("click", ()=>pickMapFile("balInput"));   // 换映射后预览自动重算
 $("balExportMap").addEventListener("click", exportMapSheet);
+$("balSyncBtn").addEventListener("click", ()=>{
+  balSync = !balSync;
+  if(balBatch) recomputeBatch();
+  else refreshBalPreview();
+});
 $("balResetMap").addEventListener("click", ()=>{
   S.mapRows = null; save();
   toast("已恢复内置映射（" + DEF_MAP.length + " 项），预览已按新映射重算");
@@ -2922,22 +3035,12 @@ $("balResetMap").addEventListener("click", ()=>{
 });
 $("balUndo").addEventListener("click", ()=>{
   if(!balUndoState) return;
-  const items = balUndoState.months || [];
-  const kill = [];
-  items.forEach(it=>{
-    S.months[it.mi] = JSON.parse(it.before);
-    (it.createdIds || []).forEach(id=>{ if(kill.indexOf(id) < 0) kill.push(id); });
-  });
-  if(kill.length){
-    S.rows = S.rows.filter(r=>kill.indexOf(r.id) < 0);
-    if(Array.isArray(S.order)) S.order = S.order.filter(id=>kill.indexOf(id) < 0);
-  }
+  const lbl = balUndoState.label || "本次导入";
+  restoreSnap(balUndoState.snap);
   balUndoState = null;
   hideBal();
   buildGrid(); syncControls(); paint(); save();
-  toast(items.length > 1
-    ? "已撤销，" + items.map(it=>it.mi + 1).sort((a,b)=>a - b).join("、") + " 月都回到写入前的样子"
-    : "已撤销，" + ((items[0] ? items[0].mi : sel) + 1) + " 月回到写入前的样子");
+  toast("已撤销，" + lbl + "回到导入前的样子（项目和数据都还原）");
 });
 $("btnSave").addEventListener("click", async ()=>{
   const name = "税金台账存档_" + S.year + ".json";
