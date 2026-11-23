@@ -359,6 +359,8 @@ const DEF_MAP = [
   {item:"印花税",         code:"222104",   name:"应交印花税",         col:"本期发生额·贷方"},
   {item:"企业所得税",     code:"222103",   name:"应交所得税",         col:"本期发生额·贷方"},
   {item:"房产税",         code:"222113",   name:"应交房产税",         col:"本期发生额·贷方"},
+  {item:"城镇土地使用税", code:"222130",   name:"城镇土地使用税",     col:"本期发生额·贷方"},
+  {item:"车辆购置税",     code:"222129",   name:"应交车辆购置税",     col:"本期发生额·贷方"},
 
   /* ===== 收入明细：编码各家不同（同为「服务收入」有的是 500103、有的是 500107），按公司分开 ===== */
   /* 广州金哪达贸易有限公司 */
@@ -2518,6 +2520,15 @@ function mapCovers(rowName, items){
     if(keyOf(it) === nm) return true;
     const iid = labelId(keyOf(it));
     if(id && iid && iid === id) return true;
+  }
+  /* 写法不同但同指一项（台账「土地使用税」↔ 映射「城镇土地使用税」）：
+     互为子串且只有一项对得上，算覆盖 —— 宁可留一行，也别把带历史数的行删掉 */
+  if(nm.length >= 3){
+    const soft = items.filter(it=>{
+      const k = keyOf(it);
+      return k.length >= 3 && (k.includes(nm) || nm.includes(k));
+    });
+    if(soft.length === 1) return true;
   }
   return false;
 }
