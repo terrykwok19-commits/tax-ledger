@@ -2912,7 +2912,7 @@ function showBalBatchPreview(){
          st.months.join("、") + " 月（这些月份整月覆盖，导入前的旧数会清掉），其它月份不动；" +
          "每个文件只按映射口径那一列取「本期发生额」，那一列空的就当这个月没发生、不取值。" +
          (balBatch.dupHint || "") + "</div>")
-      : '<div class="tip" style="color:var(--red)">没有可以写入的文件，换个文件或先检查文件名里的年月。</div>');
+      : '<div class="tip" style="color:var(--red)">没有可以写入的月份 —— 看「状态」列的原因（常见：核算单位对不上、同年月重复）。</div>');
   balBtns(true);
   $("balMask").classList.add("on");
 }
