@@ -219,6 +219,7 @@ td.cum.neg{color:var(--red);}
     </div>
     <div class="group">
       <label class="switch"><input type="checkbox" id="halve"><span class="track"><span class="knob"></span></span>附加税减半</label>
+      <label class="switch" title="小规模按季申报：附加税费只在 3/6/9/12 月按当季增值税合计计提，季中月显示 0"><input type="checkbox" id="quarterly"><span class="track"><span class="knob"></span></span>按季申报</label>
       <span class="hint" id="halveHint"></span>
     </div>
     <div class="group">
@@ -435,10 +436,13 @@ const isCityRow = r => !!r && r.kind !== "income" && r.kind !== "preCity" &&
   (r.id === "city" || /城市维护建设税|城建税/.test(r.name));
 
 const blank = () => ({});
+/* 小规模纳税人、按季申报：附加税费按季度合计计提（季中月不计提，3/6/9/12 月一次性计提） */
+const Q_CO = ["频闪","灵感"];
+const isQCo = n => Q_CO.some(k=>String(n == null ? "" : n).includes(k));
 const defaults = () => ({
   company:"金哪达贸易",
   year:new Date().getFullYear(),
-  halve:true, theme:"light",
+  halve:true, theme:"light", quarterly:false, qAuto:true,
   rows:DEF_ROWS.map(r=>Object.assign({}, r)),
   seq:1,
   mapRows:null,          // 自定义映射（导入映射表后才有），null = 用内置 DEF_MAP
@@ -565,6 +569,10 @@ function load(){
       if(isFinite(n) && n >= out.seq) out.seq = n + 1;
     });
     delete out.rates; delete out.taxes; delete out.showStamp; delete out.showIncomeTax;
+    /* 老存档没有 quarterly：按公司名给个默认（频闪 / 灵感 = 小规模按季申报）
+       qAuto 记「由公司名自动决定」，公司名一改就跟着变；手拨过开关就变成 false，不再自动 */
+    if(s.quarterly === undefined){ out.quarterly = isQCo(out.company); out.qAuto = true; }
+    else out.qAuto = s.qAuto === undefined ? false : !!s.qAuto;
     return out;
   }catch(e){ return d; }
 }
@@ -625,7 +633,7 @@ function cityRateInfo(){
   const half = r ? (r.half ? k : 1) : k;
   return { rate, half, pct: rate * half };
 }
-function calcMonth(m, carryInArg){
+function calcMonth(m, carryInArg, q){
   /* 1. 收入合计 = 当前所有收入项之和；销项税 = 各收入项 × 各自税率之和 */
   let income = 0, autoOutput = 0;
   S.rows.forEach(r=>{
@@ -655,19 +663,24 @@ function calcMonth(m, carryInArg){
   const carryOut = r2(Math.max(-vat, 0));     // 期末留抵，结转到下月
   const k = S.halve ? 0.5 : 1;
 
-  /* 3. 预缴房产城建税：以「预缴房产增值税」为计税依据，与城建税互不影响 */
+  /* 3. 按季申报（小规模）：附加税费的计税基数 —— 季中月 0，季末月取当季增值税合计
+        q 由 calcSeries 传入（本季已过月份的 base 之和、当月是否季末） */
+  const qOn = !!S.quarterly && !!q;
+  const qBase = qOn ? (q.end ? r2(q.sum + base) : 0) : base;
+
+  /* 4. 预缴房产城建税：以「预缴房产增值税」为计税依据，与城建税互不影响 */
   const cityInfo = cityRateInfo();                            // 城建税率（含减半）
   const autoPreCity = r2(preVat * cityInfo.pct / 100);
   const manPreCity = has(m[OV("preCity")]);
   const preCity = manPreCity ? r2(num(m[OV("preCity")])) : autoPreCity;
 
-  /* 4. 附加税费 = 增值税基数 × 费率（可减半、可手改）；手工税费直接取数 */
+  /* 5. 附加税费 = 增值税基数 × 费率（可减半、可手改）；手工税费直接取数 */
   const vals = {}, auto = {}, autoRaw = {}, manual = {};
   let vatFee = 0, otherFee = 0;
   S.rows.forEach(r=>{
     if(r.kind === "income"){ vals[r.id] = r2(num(m[r.id])); return; }
     if(r.kind === "vatRate"){
-      const a = r2(base * num(r.rate) / 100 * (r.half ? k : 1));
+      const a = r2(qBase * num(r.rate) / 100 * (r.half ? k : 1));
       autoRaw[r.id] = a;
       auto[r.id] = a;
       manual[r.id] = has(m[OV(r.id)]);
@@ -679,11 +692,11 @@ function calcMonth(m, carryInArg){
   });
   vatFee = r2(vatFee); otherFee = r2(otherFee);
 
-  /* 5. 税金合计 = 应纳增值税 + 预缴房产增值税 + 附加税费 + 手工税费 + 预缴房产城建税
+  /* 6. 税金合计 = 应纳增值税 + 预缴房产增值税 + 附加税费 + 手工税费 + 预缴房产城建税
         预缴房产增值税虽然从应纳增值税里减掉了，但它本身也是本月实际承担的税金，合计里要加回来 */
   const total = r2(base + preVat + vatFee + otherFee + preCity);
 
-  /* 5. 毛利 = 收入合计 − 主营业务成本；毛利率 = 毛利 ÷ 收入合计
+  /* 7. 毛利 = 收入合计 − 主营业务成本；毛利率 = 毛利 ÷ 收入合计
         成本没填（也没填 0）时毛利与毛利率都留空，避免一填收入就显示 100% */
   const costFilled = has(m.cost);
   const cost = r2(num(m.cost));
@@ -704,22 +717,24 @@ function calcMonth(m, carryInArg){
 
   return { income, output, inputTax, preVat, preCity, preCityAuto:autoPreCity,
            carryIn, carryOut, vat, vatAuto:autoVat, base, total, vals, auto, autoRaw, manual,
-           vatFee, other: otherFee, cost, gross, margin, costFilled };
+           vatFee, other: otherFee, cost, gross, margin, costFilled, qOn, qBase };
 }
 /* 逐月算一遍，把留抵按月结转：本期期末留抵 = 下月期初留抵（1 月可手填上年结转）。
    n 只有 12，直接顺序走一遍，比到处传参省事 */
 function calcSeries(){
   const out = [];
-  let carry = 0;
+  let carry = 0, qsum = 0;                 // qsum：本季已过月份的增值税基数合计
   for(let i=0;i<N;i++){
     const m = S.months[i];
     const man = has(m[OV("carryIn")]);
     const ci = man ? r2(num(m[OV("carryIn")])) : (i === 0 ? 0 : carry);
-    const c = calcMonth(m, ci);
+    const c = calcMonth(m, ci, {sum:qsum, end:(i % 3 === 2)});
     c.carryInAuto = (i === 0 ? 0 : carry);
     c.carryManual = man;
     out.push(c);
     carry = c.carryOut;
+    qsum = r2(qsum + c.base);
+    if(i % 3 === 2) qsum = 0;              // 季度结束，重新累计
   }
   return out;
 }
@@ -1280,6 +1295,16 @@ function paintPanel(){
     : '<span class="muted">（没有附加税费项目）</span>';
   const feeLine = fees.filter(r=>num(m[r.id]) !== 0).map(r=>r.name + " " + fmt(num(m[r.id]))).join(" ＋ ");
 
+  /* 附加税费基数一行：按季申报时季中月为 0，季末月是本季增值税合计 */
+  const qEnd = (sel % 3 === 2), qFrom = Math.floor(sel/3)*3 + 1, qTo = qFrom + 2;
+  const feeBaseLine = !cur.qOn
+    ? '<p>附加税费基数 <b>' + fmt(cur.base) + '</b> × ' + k + '：' + rateLine + '</p>'
+    : qEnd
+      ? '<p>附加税费基数 <b>' + fmt(cur.qBase) + '</b> × ' + k + '：' + rateLine +
+        '　<span class="muted">（按季申报：本季 ' + qFrom + '–' + qTo + ' 月增值税合计）</span></p>'
+      : '<p>附加税费基数 <b>0.00</b>　<span class="muted">（按季申报：季中月不计提，' + qTo +
+        ' 月按本季 ' + qFrom + '–' + qTo + ' 月增值税合计计提）</span></p>';
+
   $("detail").innerHTML =
     '<p><b>收入合计 ' + fmt(cur.income) + '</b> ＝ ' +
       (incomes.length ? incomes.map(r=>r.name + ' ' + fmt(num(m[r.id]))).join(" ＋ ") : '<span class="muted">（无）</span>') + '</p>' +
@@ -1298,7 +1323,7 @@ function paintPanel(){
       ? '<p>期末留抵 <b>' + fmt(cur.carryOut) + '</b> ＝ 销项税＋期初留抵 － 进项税 － 预缴房产增值税' +
         '　<span class="muted">（本月不交增值税，结转到 ' + (sel + 2 <= 12 ? (sel + 2) + ' 月继续抵扣' : '下一年度继续抵扣') + '）</span></p>'
       : '') +
-    '<p>附加税费基数 <b>' + fmt(cur.base) + '</b> × ' + k + '：' + rateLine + '</p>' +
+    feeBaseLine +
     (cur.preVat || cur.preCity
       ? '<p>预缴房产城建税 <b>' + fmt(cur.preCity) + '</b> ＝ 预缴房产增值税 ' + fmt(cur.preVat) +
         ' × ' + fmt(cityRateInfo().pct) + '%' + (cur.manual.preCity ? '　<span class="tag">手改</span>' : '') +
@@ -1329,15 +1354,16 @@ function syncControls(){
   $("company").value = S.company || "";
   $("year").value = S.year;
   $("halve").checked = S.halve;
+  $("quarterly").checked = !!S.quarterly;
 
   const ordRows = rowsOf();
   const incs  = ordRows.filter(r=>r.kind === "income");
   const rates = ordRows.filter(r=>r.kind === "vatRate");
   $("subTitle").textContent = (S.company ? S.company + " · " : "") + S.year + " 年度 · " +
     (incs.length ? incs.map(r=>r.name + " " + num(r.rate) + "%").join(" / ") : "无收入项");
-  $("halveHint").textContent = !rates.length ? "无附加税费" : (S.halve
+  $("halveHint").textContent = !rates.length ? "无附加税费" : ((S.halve
     ? rates.slice(0,3).map(r=>r.name + " " + (num(r.rate)/2) + "%").join(" / ") + (rates.length > 3 ? " …" : "")
-    : "全额征收");
+    : "全额征收") + (S.quarterly ? " · 按季计提" : ""));
 
   document.querySelectorAll("th i[data-rt]").forEach(i=>{
     const r = S.rows.find(x=>x.id === i.dataset.rt);
@@ -3086,9 +3112,21 @@ $("company").addEventListener("input", e=>{
     rowsOf().filter(r=>r.kind === "income").map(r=>r.name + " " + num(r.rate) + "%").join(" / ");
   save();
 });
-$("company").addEventListener("blur", ()=> syncControls());
+$("company").addEventListener("blur", ()=>{
+  /* 公司名改成频闪 / 灵感时自动转按季申报（只在这条规则还没被手动改过时生效） */
+  if(S.qAuto && isQCo(S.company) !== !!S.quarterly){
+    S.quarterly = isQCo(S.company);
+    syncControls(); paint(); save();
+    toast(S.quarterly ? "「" + S.company + "」按小规模按季申报计提附加税" : "已取消按季申报，附加税按月计提");
+  }
+  syncControls();
+});
 $("year").addEventListener("change", e=>{ S.year = +e.target.value || S.year; syncControls(); save(); });
 $("halve").addEventListener("change", e=>{ S.halve = e.target.checked; syncControls(); paint(); save(); });
+$("quarterly").addEventListener("change", e=>{
+  S.quarterly = e.target.checked; S.qAuto = false;   // 手拨过就不再跟公司名自动变
+  syncControls(); paint(); save();
+});
 $("addIncome").addEventListener("click", ()=> addRow("income"));
 $("addVatFee").addEventListener("click", ()=> addRow("vatRate"));
 $("addFee").addEventListener("click", ()=> addRow("input"));
