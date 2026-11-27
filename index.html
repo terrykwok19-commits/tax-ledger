@@ -9,6 +9,7 @@
   --bg:#f2f4f7; --card:#fff; --line:#e3e7ee; --line-strong:#c9d1dc;
   --text:#18202c; --muted:#6b7787; --accent:#2563eb; --accent-soft:#eef4ff;
   --in-bg:#fffaf0; --calc-bg:#f5f7fa; --manual:#fdeeb3; --manual-bd:#d99b1e;
+  --bal-bg:#e6f1ff; --bal-bd:#2f6fd0;
   --red:#cf2f22; --sum-bg:#eaf1fd;
   --head-bg:#eaeff6; --head-text:#33415c; --head-hover:#dfe8f6; --tot-head:#e2ebf9;
   --tot-bg:#f7f9fc; --tot-sum:#dde8fb; --hl-bg:#eef6f1; --hl-text:#0d5c46;
@@ -23,6 +24,7 @@
   --bg:#0f1319; --card:#171d26; --line:#252e3b; --line-strong:#374354;
   --text:#e4eaf3; --muted:#8a97a9; --accent:#5b93f8; --accent-soft:#1b2740;
   --in-bg:#1d232e; --calc-bg:#141a22; --manual:#3d3218; --manual-bd:#c19434;
+  --bal-bg:#152539; --bal-bd:#5b93f8;
   --red:#ef7368; --sum-bg:#1a2742;
   --head-bg:#1e2733; --head-text:#b6c4d6; --head-hover:#27323f; --tot-head:#22303f;
   --tot-bg:#1a212b; --tot-sum:#22334f; --hl-bg:#15271f; --hl-text:#5ed3a3;
@@ -97,6 +99,9 @@ td.edit input:focus{background:var(--card);box-shadow:inset 0 0 0 2px var(--acce
 td.hybrid{background:var(--calc-bg);}
 td.hybrid.manual{background:var(--manual);}
 td.hybrid.manual input{padding-right:20px;}
+/* 余额表取来的值：淡蓝底（手敲的是黄底），↺ 仍可恢复自动 */
+td.hybrid.manual.frombal,tr.vat td.hybrid.manual.frombal{background:var(--bal-bg);}
+td.hybrid.manual.frombal .undo{border-color:var(--bal-bd);color:var(--bal-bd);}
 td .undo{display:none;position:absolute;right:1px;top:50%;transform:translateY(-50%);
   width:17px;height:17px;line-height:15px;padding:0;border-radius:5px;font-size:11px;
   border:1px solid var(--manual-bd);color:var(--manual-bd);background:var(--card);}
@@ -757,7 +762,10 @@ function migratePreCity(){
 function normalizePreCity(m){
   if(!has(m[OV("preCity")])) return;
   const c = calcMonth(m);
-  if(Math.abs(num(m[OV("preCity")]) - c.preCityAuto) <= 0.005) delete m[OV("preCity")];
+  if(Math.abs(num(m[OV("preCity")]) - c.preCityAuto) <= 0.005){
+    delete m[OV("preCity")];
+    if(m.src) delete m.src[OV("preCity")];
+  }
 }
 /* 增值税手填值如果正好等于自动算的「本月应纳」（留抵月自动值取 0），也回归自动 ——
    免得手敲一遍 0 就把当月的留抵弄丢了。ci 是当月的期初留抵（算自动值要用） */
@@ -767,6 +775,7 @@ function normalizeVat(m, ci){
   delete m[OV("vat")];
   const c = calcMonth(m, ci);
   if(Math.abs(num(saved) - Math.max(c.vat, 0)) > 0.005) m[OV("vat")] = saved;
+  else if(m.src) delete m.src[OV("vat")];
 }
 function isBlank(m){
   if(has(m.inputTax)) return false;
@@ -872,7 +881,9 @@ function buildGrid(){
   t.querySelectorAll(".undo").forEach(b=>{
     b.addEventListener("click", e => {
       e.preventDefault(); e.stopPropagation();
-      S.months[+b.dataset.i][OV(b.dataset.f)] = null;
+      const mm = S.months[+b.dataset.i];
+      mm[OV(b.dataset.f)] = null;
+      if(mm.src) delete mm.src[OV(b.dataset.f)];
       paint(); save();
     });
   });
@@ -1056,9 +1067,11 @@ function delRow(id){
 function onInput(f, i, kind, el){
   const raw = el.value.replace(/,/g,"").replace(/[^\d.\-]/g,"");
   if(raw !== el.value) el.value = raw;
+  const m = S.months[i];
   if(kind === "output" || kind === "vat" || kind === "vatRate" || kind === "preCity" || kind === "carryIn")
-    S.months[i][OV(f)] = (raw === "" ? null : raw);
-  else S.months[i][f] = raw;
+    m[OV(f)] = (raw === "" ? null : raw);
+  else m[f] = raw;
+  if(m.src){ delete m.src[OV(f)]; delete m.src[f]; }   // 手动敲过就不再算「余额表取值」
   paint(); save();
 }
 function onKey(e, f, i){
@@ -1179,17 +1192,19 @@ function paint(){
         setVal(el, val);
       }
       el.parentElement.classList.toggle("manual", man);
+      const fromBal = man && !!(m.src && m.src[OV(r.id)]);
+      el.parentElement.classList.toggle("frombal", fromBal);
       el.title = isCarry
         ? (man ? "手动值（上月期末留抵 " + fmt(c.carryInAuto) + "），点 ↺ 恢复自动结转"
                : (i === 0 ? "1 月可手填上年结转的留抵，其余月份自动结转上月期末留抵"
                           : "自动结转上月期末留抵 " + fmt(c.carryInAuto) + "，可直接改成手填值"))
         : r.kind === "preCity"
-        ? (man ? "手动值（预缴增值税 " + fmt(c.preVat) + " × " + fmt(cityRateInfo().pct) + "% = " + fmt(c.auto.preCity) + "），点 ↺ 恢复自动"
+        ? (man ? (fromBal ? "余额表取值 " : "手动值（") + fmt(num(m[OV(r.id)])) + "（自动算得 " + fmt(c.auto.preCity) + "），点 ↺ 恢复自动"
                : "自动计算：预缴房产增值税 " + fmt(c.preVat) + " × " + fmt(cityRateInfo().pct) + "%，可直接改成手填值")
         : r.kind === "vat"
-        ? (man ? "手动值（自动算得 " + fmt(c.vatAuto) + "，本月应纳 " + fmt(c.auto.vat) + "），点 ↺ 恢复自动"
+        ? (man ? (fromBal ? "余额表取值 " : "手动值（") + fmt(num(m[OV(r.id)])) + "（自动算得 " + fmt(c.vatAuto) + "），点 ↺ 恢复自动"
                : "自动计算：" + fmt(c.auto.vat) + " ＝ 销项税 − 进项税 − 预缴房产增值税 − 期初留抵，可直接改成手填值（如申报表的应纳税额）")
-        : (man ? "手动值（自动值应为 " + fmt(c.auto[r.id]) + "），点 ↺ 恢复自动"
+        : (man ? (fromBal ? "余额表取值 " : "手动值（") + fmt(num(m[OV(r.id)])) + "（自动值应为 " + fmt(c.auto[r.id]) + "），点 ↺ 恢复自动"
                : "自动计算：" + fmt(c.auto[r.id]) + "，可直接改成手填值");
     });
 
@@ -2590,15 +2605,27 @@ function planBalance(matrix, fileName){
   function feed(it){
     const item = keyOf(it.item), code = keyOf(it.code), wantName = keyOf(it.name);
     if(!item) return;
-    /* 增值税一律按账取「未交增值税·本期贷方」：当月没计提就是 0，也要写 0 覆盖自动值。
-       按季申报的公司季中月贷方是 0、季末月是整个季度计提数，账上是什么就记什么 */
-    const isVat = labelId(item) === "vat";
+    const t = balTarget(item, true);                 // dry：只判断落到哪一行，不建行
+    /* 税费项一律「按账取值」：增值税 / 附加税费 / 印花税 / 房产税 / 土地税 / 车购税……
+       账上这个月没计提（发生额为 0、列为空、甚至没这个科目）就记 0，
+       不让「销项 × 费率」的自动值顶上去。
+       销项税 / 进项税是增值税的计算基础，科目整个缺失时仍保留自动值（多半是科目编码没对上），
+       只有科目在、本期发生额为 0 才按 0 记 */
+    const taxZero = !!t && (t.fixed === "vat" || t.fixed === "preVat" || t.fixed === "preCity" ||
+                            (!t.fixed && (t.row.kind === "vatRate" || t.row.kind === "input")));
+    const taxItem = taxZero || (!!t && (t.fixed === "output" || t.fixed === "inputTax"));
     let row = byCode[code], usedCode = code;
     if(!row && wantName){                            // 科目编码对不上就按科目名称找一次
       const alt = codes.find(c=>keyOf((byCode[c]||[])[1]) === wantName);
       if(alt){ row = byCode[alt]; usedCode = alt; }
     }
     if(!row){
+      if(taxZero && !byItem.has(item)){              // 账上没这个科目 = 本期没这个税，记 0
+        const l = {item, acct: code + " " + (wantName || ""), col: "", v: 0, skip: false,
+                   isIncome:false, ovKey: "", note: "余额表里没有该科目（本期无发生额），按 0 记"};
+        byItem.set(item, l); lines.push(l);
+        return;
+      }
       if(!byItem.has(item)) miss.push(item + "（余额表里没有科目 " + code + (wantName ? " " + wantName : "") +
                                         "，本期无发生额或尚未启用）");
       return;
@@ -2613,10 +2640,10 @@ function planBalance(matrix, fileName){
     const prev = byItem.get(item);
 
     /* 严格按映射口径的那一列取数：本期发生额为空就说明这个月没发生，不取值、也不改取对方方向。
-       增值税例外：本期贷方为 0 / 为空，就是账上这个月没计提，按 0 写入（否则台账会用自动算的值冒充） */
+       税费项例外：0 / 空就是账上这个月没有，按 0 写入覆盖自动值 */
     if(raw === null || Math.abs(raw) < 0.005){
-      if(prev && !(isVat && prev.skip)) return;     // 同一项目别的明细已经取到数，这条空的直接忽略
-      if(!isVat){
+      if(prev && !(taxItem && prev.skip)) return;    // 同一项目别的明细已经取到数，这条空的直接忽略
+      if(!taxItem){
         let hint = "";
         if(raw === null && pick.other >= 0){
           const o = cellNum(row[pick.other]);
@@ -2630,14 +2657,14 @@ function planBalance(matrix, fileName){
       }
     }
 
-    const t = balTarget(item, true);                 // dry：只判断落到哪一行，不建行
     if(!balPutKey(t)){ miss.push(item + "（这一项不能直接填数）"); return; }
     /* 收入项按「借方」口径取到的是冲减（退货/红字），取负号；成本、税费按借侧是正常发生额，保持正数 */
     const isIncome = !t.fixed && t.row.kind === "income";
     const rv = raw === null ? 0 : raw;
     const v = (isIncome && pick.side === "D") ? -rv : rv;
     let note = (isIncome && pick.side === "D") ? "按借方口径取数，作冲减" : "";
-    if(isVat && Math.abs(v) < 0.005) note = "账上本月「未交增值税」贷方为 0，按 0 记（不按销项自动算）";
+    if(taxItem && Math.abs(v) < 0.005)
+      note = (t.fixed === "vat" ? "账上「未交增值税」本期贷方为 0" : "账上本期发生额为 0") + "，按 0 记（不用自动计算值）";
     if(t.created) note = (note ? note + "；" : "") + "新建行「" + t.created + "」";
 
     if(prev && !prev.skip){                          // 同一项目第 2、3 条明细 → 累加
@@ -2730,6 +2757,10 @@ function applyBalance(plan){
     if(has(m[OV(r.id)]) && Math.abs(num(m[OV(r.id)]) - num(ser[mi].auto[r.id])) <= 0.005) delete m[OV(r.id)];
   });
   normalizePreCity(m);
+
+  /* 记来源：余额表取来的格子用淡蓝底，跟手敲的黄底区分开（只标存活的取数值） */
+  m.src = {};
+  plan.lines.forEach(l=>{ if(l.ovKey && has(m[l.ovKey])) m.src[l.ovKey] = 1; });
 
   plan.lines.forEach(l=>{ l.manual = l.ovKey ? has(m[l.ovKey]) : false; });
   plan.wrote = plan.lines.filter(l=>!l.skip).length;
@@ -3054,8 +3085,8 @@ function balTable(r){
   const rows = r.lines.map(l=>
     "<tr><td>" + esc(l.item) + "</td><td>" + esc(l.acct) + "</td><td>" + esc(l.col) + "</td>" +
     '<td class="num">' + (l.skip ? "—" : fmt(l.v)) + "</td>" +
-    '<td class="note' + (l.skip ? "" : l.manual ? " fb" : "") + '">' +
-    esc(l.note || (l.manual ? "手改值" : "自动命中")) + "</td></tr>").join("");
+    '<td class="note' + (l.skip ? "" : " fb") + '">' +
+    esc(l.note || (l.skip ? "未取值" : "按账写入")) + "</td></tr>").join("");
   const missHtml = r.miss.length
     ? '<div class="tip" style="color:var(--red)">没取到数：' + r.miss.map(esc).join("；") + "</div>" : "";
   const notesHtml = (r.notes && r.notes.length)
