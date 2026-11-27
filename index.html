@@ -666,7 +666,10 @@ function calcMonth(m, carryInArg, q){
   /* 3. 按季申报（小规模）：附加税费的计税基数 —— 季中月 0，季末月取当季增值税合计
         q 由 calcSeries 传入（本季已过月份的 base 之和、当月是否季末） */
   const qOn = !!S.quarterly && !!q;
-  const qBase = qOn ? (q.end ? r2(q.sum + base) : 0) : base;
+  /* 季末月的增值税若是「按账取值」（未交增值税贷方本身就是整个季度计提数），
+     直接拿它当附加税基数；再叠加前两个月就把收入重复计税了。
+     没取数时才退回「三个月应纳增值税累计」 */
+  const qBase = qOn ? (q.end ? (manVat ? base : r2(q.sum + base)) : 0) : base;
 
   /* 4. 预缴房产城建税：以「预缴房产增值税」为计税依据，与城建税互不影响 */
   const cityInfo = cityRateInfo();                            // 城建税率（含减半）
@@ -764,21 +767,6 @@ function normalizeVat(m, ci){
   delete m[OV("vat")];
   const c = calcMonth(m, ci);
   if(Math.abs(num(saved) - Math.max(c.vat, 0)) > 0.005) m[OV("vat")] = saved;
-}
-/* 按季申报：老数据里被「未交增值税 = 0」写入手改位、而当月销项明明有数的，清掉回归自动。
-   只清 0 值手改，用户手动填的非 0 值不动 */
-function cleanQvat(){
-  if(!S.quarterly) return 0;
-  const ser = calcSeries();
-  let n = 0;
-  S.months.forEach((m, i)=>{
-    if(!has(m[OV("vat")])) return;
-    /* 用 vatAuto（未受手改影响的自动应纳），不能用 auto.vat —— 手改 0 时它也是 0 */
-    if(Math.abs(num(m[OV("vat")])) < 0.005 && Math.max(ser[i].vatAuto, 0) >= 0.005){
-      delete m[OV("vat")]; n++;
-    }
-  });
-  return n;
 }
 function isBlank(m){
   if(has(m.inputTax)) return false;
@@ -1328,15 +1316,15 @@ function paintPanel(){
       (cur.margin === null ? '' : '　<span class="muted">毛利率 ' + pctTxt(pct(cur.gross, cur.income)) + '</span>') + '</p>' +
     '<p><b>销项税 ' + fmt(cur.output) + '</b> ＝ ' + outLine + manTags + '</p>' +
     (cur.manual.vat
-      ? '<p><b>增值税 ' + fmt(cur.base) + '</b>（本月应纳 · 手改）＝ 手填 ' + fmt(cur.vat) +
-        '　<span class="muted">（自动算得 ' + fmt(cur.vatAuto) + '；附加税费与税金合计都按手填值走，点 ↺ 可恢复自动）</span></p>'
+      ? '<p><b>增值税 ' + fmt(cur.base) + '</b>（本月应纳 · 按账取值）＝ ' + fmt(cur.vat) +
+        '　<span class="muted">（自动算得 ' + fmt(cur.vatAuto) + '；当月「未交增值税」贷方是多少就记多少，为 0 就记 0。点 ↺ 恢复自动）</span></p>'
       : '<p><b>增值税 ' + fmt(cur.base) + '</b>（本月应纳）＝ 销项税 ' + fmt(cur.output) + ' － 进项税 ' + fmt(num(m.inputTax)) +
         (cur.preVat ? ' － 预缴房产增值税 ' + fmt(cur.preVat) : '') +
         (cur.carryIn ? ' － 期初留抵税额 ' + fmt(cur.carryIn) : '') +
         (cur.vat < 0 ? '　<span class="muted">（算得 ' + fmt(cur.vat) + '，本月应纳取 0，全额留抵结转下期）</span>' : '') + '</p>') +
     (cur.qOn && qEnd
-      ? '<p class="muted">按季申报：本季 ' + qFrom + '–' + qTo + ' 月应纳增值税合计 <b>' + fmt(cur.qBase) +
-        '</b>（本行按月列示，三个月加起来才是季度申报数；账上季末「未交增值税」应与此相符）</p>'
+      ? '<p class="muted">按季申报：附加税费按 ' + qFrom + '–' + qTo + ' 月合计计提，基数 <b>' + fmt(cur.qBase) + '</b>' +
+        (cur.manual.vat ? '（取账上季末计提的增值税）' : '（本季三个月应纳增值税合计）') + '</p>'
       : '') +
     (cur.carryOut
       ? '<p>期末留抵 <b>' + fmt(cur.carryOut) + '</b> ＝ 销项税＋期初留抵 － 进项税 － 预缴房产增值税' +
@@ -1392,14 +1380,11 @@ function syncControls(){
   });
   applyTheme();
 }
-/* 切换按季申报：打开时把各月手改的增值税清掉，回到「按当月销项自动算」。
-   按季公司的「未交增值税」季中月是 0、季末月是整个季度合计，取来覆盖月度行都是错的 */
+/* 切换按季申报：只改附加税费的计提节奏（季中 0 / 季末按季合计）。
+   增值税行始终是「未交增值税·本期贷方」，跟开关无关，手改/取数一律不动 */
 function setQuarterly(on){
   S.quarterly = !!on;
-  let n = 0;
-  if(on) S.months.forEach(m=>{ if(has(m[OV("vat")])){ delete m[OV("vat")]; n++; } });
   syncControls(); paint(); save();
-  return n;
 }
 function save(){
   try{
@@ -2605,15 +2590,9 @@ function planBalance(matrix, fileName){
   function feed(it){
     const item = keyOf(it.item), code = keyOf(it.code), wantName = keyOf(it.name);
     if(!item) return;
-    /* 按季申报：增值税按当月销项自动算，不取「未交增值税」——
-       季中月这个科目是 0，季末月又是整个季度的合计，取哪个都不对 */
-    if(S.quarterly && labelId(item) === "vat"){
-      if(!byItem.has(item)){
-        byItem.set(item, {skip:true});
-        notes.push("增值税：按季申报，按当月销项自动计算，不取「未交增值税」");
-      }
-      return;
-    }
+    /* 增值税一律按账取「未交增值税·本期贷方」：当月没计提就是 0，也要写 0 覆盖自动值。
+       按季申报的公司季中月贷方是 0、季末月是整个季度计提数，账上是什么就记什么 */
+    const isVat = labelId(item) === "vat";
     let row = byCode[code], usedCode = code;
     if(!row && wantName){                            // 科目编码对不上就按科目名称找一次
       const alt = codes.find(c=>keyOf((byCode[c]||[])[1]) === wantName);
@@ -2633,27 +2612,32 @@ function planBalance(matrix, fileName){
     const acct = usedCode + " " + (wantName || keyOf(row[1]) || "");
     const prev = byItem.get(item);
 
-    /* 严格按映射口径的那一列取数：本期发生额为空就说明这个月没发生，不取值、也不改取对方方向 */
+    /* 严格按映射口径的那一列取数：本期发生额为空就说明这个月没发生，不取值、也不改取对方方向。
+       增值税例外：本期贷方为 0 / 为空，就是账上这个月没计提，按 0 写入（否则台账会用自动算的值冒充） */
     if(raw === null || Math.abs(raw) < 0.005){
-      if(prev) return;                               // 同一项目别的明细已经取到数，这条空的直接忽略
-      let hint = "";
-      if(raw === null && pick.other >= 0){
-        const o = cellNum(row[pick.other]);
-        if(o !== null && Math.abs(o) >= 0.005)
-          hint = "（" + (pick.side === "C" ? "借方" : "贷方") + "有 " + fmt(Math.abs(o)) + "，要取请改口径）";
+      if(prev && !(isVat && prev.skip)) return;     // 同一项目别的明细已经取到数，这条空的直接忽略
+      if(!isVat){
+        let hint = "";
+        if(raw === null && pick.other >= 0){
+          const o = cellNum(row[pick.other]);
+          if(o !== null && Math.abs(o) >= 0.005)
+            hint = "（" + (pick.side === "C" ? "借方" : "贷方") + "有 " + fmt(Math.abs(o)) + "，要取请改口径）";
+        }
+        const l = {item, acct, col: pick.label, v: 0, skip: true, isIncome:false, ovKey: "",
+                   note: (raw === null ? "本期发生额为空，未取值" : "本期发生额为 0，未取值") + hint};
+        byItem.set(item, l); lines.push(l);
+        return;
       }
-      const l = {item, acct, col: pick.label, v: 0, skip: true, isIncome:false, ovKey: "",
-                 note: (raw === null ? "本期发生额为空，未取值" : "本期发生额为 0，未取值") + hint};
-      byItem.set(item, l); lines.push(l);
-      return;
     }
 
     const t = balTarget(item, true);                 // dry：只判断落到哪一行，不建行
     if(!balPutKey(t)){ miss.push(item + "（这一项不能直接填数）"); return; }
     /* 收入项按「借方」口径取到的是冲减（退货/红字），取负号；成本、税费按借侧是正常发生额，保持正数 */
     const isIncome = !t.fixed && t.row.kind === "income";
-    const v = (isIncome && pick.side === "D") ? -raw : raw;
+    const rv = raw === null ? 0 : raw;
+    const v = (isIncome && pick.side === "D") ? -rv : rv;
     let note = (isIncome && pick.side === "D") ? "按借方口径取数，作冲减" : "";
+    if(isVat && Math.abs(v) < 0.005) note = "账上本月「未交增值税」贷方为 0，按 0 记（不按销项自动算）";
     if(t.created) note = (note ? note + "；" : "") + "新建行「" + t.created + "」";
 
     if(prev && !prev.skip){                          // 同一项目第 2、3 条明细 → 累加
@@ -3153,9 +3137,9 @@ $("company").addEventListener("input", e=>{
 $("company").addEventListener("blur", ()=>{
   /* 公司名改成频闪 / 灵感时自动转按季申报（只在这条规则还没被手动改过时生效） */
   if(S.qAuto && isQCo(S.company) !== !!S.quarterly){
-    const n = setQuarterly(isQCo(S.company));
+    setQuarterly(isQCo(S.company));
     toast(S.quarterly
-      ? "「" + S.company + "」按小规模按季申报计提" + (n ? "，已清掉 " + n + " 个月手改增值税" : "")
+      ? "「" + S.company + "」按小规模按季申报计提附加税"
       : "已取消按季申报，附加税按月计提");
   }
   syncControls();
@@ -3164,8 +3148,7 @@ $("year").addEventListener("change", e=>{ S.year = +e.target.value || S.year; sy
 $("halve").addEventListener("change", e=>{ S.halve = e.target.checked; syncControls(); paint(); save(); });
 $("quarterly").addEventListener("change", e=>{
   S.qAuto = false;                                   // 手拨过就不再跟公司名自动变
-  const n = setQuarterly(e.target.checked);
-  if(n) toast("已清掉 " + n + " 个月的手改增值税，改按当月销项重算");
+  setQuarterly(e.target.checked);
 });
 $("addIncome").addEventListener("click", ()=> addRow("income"));
 $("addVatFee").addEventListener("click", ()=> addRow("vatRate"));
@@ -3307,8 +3290,6 @@ $("btnClear").addEventListener("click", ()=>{
 /* ---------- 启动 ---------- */
 foldPrepaidRows();      // 老存档里的「预缴房产增值税/城建税」手工行并进固定行
 migratePreCity();       // 老的预缴房产城建税手填值 → 双态行手改值
-const qClean = cleanQvat();   // 按季公司：清掉被「未交增值税 0」带成 0 的增值税
-if(qClean) setTimeout(()=>toast("按季申报：已修正 " + qClean + " 个月被「未交增值税 0」带成 0 的增值税"), 600);
 for(let i=N-1;i>=0;i--){ if(!isBlank(S.months[i])){ sel = i; break; } }
 buildGrid();
 syncControls();
